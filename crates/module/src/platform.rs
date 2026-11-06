@@ -120,23 +120,66 @@ impl Platform for Host {
 #[cfg(test)]
 pub mod memory {
     //! In-memory platform for native tests. "Encryption" is a reversible tag
-    //! check so tests catch aad mismatches.
+    //! check so tests catch aad mismatches. Views share one store, each with
+    //! its own mode and write hook, so tests can interleave concurrent runs.
 
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
+    use std::rc::Rc;
 
-    pub struct Memory {
+    pub struct Memory<'a> {
         pub mode: Mode,
-        pub store: RefCell<BTreeMap<String, Vec<u8>>>,
+        pub store: Rc<RefCell<BTreeMap<String, Vec<u8>>>>,
+        /// Storage calls made, the resource OutLayer limits per run.
+        pub calls: Rc<Cell<usize>>,
+        /// A conditional write to a key under `prefix` first runs
+        /// `before_write`, then fails while `failures` is positive.
+        pub prefix: String,
+        pub before_write: Box<dyn Fn(&str) + 'a>,
+        pub failures: Cell<usize>,
     }
 
-    impl Memory {
+    impl Memory<'_> {
         pub fn new(mode: Mode) -> Self {
+            Self::with_store(mode, BTreeMap::new())
+        }
+
+        /// Independent storage holding a copy of `store`.
+        pub fn with_store(mode: Mode, store: BTreeMap<String, Vec<u8>>) -> Self {
             Self {
                 mode,
-                store: RefCell::default(),
+                store: Rc::new(RefCell::new(store)),
+                calls: Rc::default(),
+                prefix: String::new(),
+                before_write: Box::new(|_| {}),
+                failures: Cell::new(0),
             }
+        }
+
+        /// Another run on the same storage.
+        pub fn view<'b>(&self, mode: Mode) -> Memory<'b> {
+            Memory {
+                store: self.store.clone(),
+                calls: self.calls.clone(),
+                ..Memory::new(mode)
+            }
+        }
+
+        fn call(&self) {
+            self.calls.set(self.calls.get() + 1);
+        }
+
+        fn intercept(&self, key: &str) -> Result<()> {
+            if self.prefix.is_empty() || !key.starts_with(&self.prefix) {
+                return Ok(());
+            }
+            (self.before_write)(key);
+            if self.failures.get() > 0 {
+                self.failures.set(self.failures.get() - 1);
+                return Err(Error("injected storage failure".into()));
+            }
+            Ok(())
         }
 
         /// Raw keys under `prefix`. Tests only: the module never lists storage.
@@ -150,7 +193,7 @@ pub mod memory {
         }
     }
 
-    impl Platform for Memory {
+    impl Platform for Memory<'_> {
         fn mode(&self) -> Result<Mode> {
             Ok(self.mode)
         }
@@ -174,6 +217,7 @@ pub mod memory {
             Ok(h.finish().to_le_bytes().to_vec())
         }
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.call();
             Ok(self.store.borrow().get(key).cloned())
         }
         fn set(&self, key: &str, value: &[u8]) -> Result<()> {
@@ -181,6 +225,8 @@ pub mod memory {
             Ok(())
         }
         fn set_if_absent(&self, key: &str, value: &[u8]) -> Result<bool> {
+            self.intercept(key)?;
+            self.call();
             let mut s = self.store.borrow_mut();
             if s.contains_key(key) {
                 return Ok(false);
@@ -189,6 +235,8 @@ pub mod memory {
             Ok(true)
         }
         fn compare_and_swap(&self, key: &str, expected: &[u8], value: &[u8]) -> Result<bool> {
+            self.intercept(key)?;
+            self.call();
             let mut store = self.store.borrow_mut();
             if store.get(key).map(Vec::as_slice) != Some(expected) {
                 return Ok(false);
@@ -197,78 +245,8 @@ pub mod memory {
             Ok(true)
         }
         fn delete(&self, key: &str) -> Result<bool> {
+            self.call();
             Ok(self.store.borrow_mut().remove(key).is_some())
-        }
-    }
-}
-
-#[cfg(test)]
-pub mod interleaving {
-    use super::memory::Memory;
-    use super::*;
-    use std::cell::{Cell, RefCell};
-
-    /// Share one storage cell across modes and pause one response write.
-    pub struct View<'a> {
-        pub inner: &'a Memory,
-        pub mode: Mode,
-        pub prefix: String,
-        pub failures: Cell<usize>,
-        pub before_write: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
-    }
-    impl<'a> View<'a> {
-        pub fn new(inner: &'a Memory, mode: Mode) -> Self {
-            Self {
-                inner,
-                mode,
-                prefix: String::new(),
-                failures: Cell::new(0),
-                before_write: RefCell::new(None),
-            }
-        }
-        fn pause(&self, key: &str) -> Result<()> {
-            if !self.prefix.is_empty() && key.starts_with(&self.prefix) {
-                let hook = self.before_write.borrow_mut().take();
-                if let Some(hook) = hook {
-                    hook();
-                }
-                if self.failures.get() > 0 {
-                    self.failures.set(self.failures.get() - 1);
-                    return Err(Error("injected storage failure".into()));
-                }
-            }
-            Ok(())
-        }
-    }
-    impl Platform for View<'_> {
-        fn mode(&self) -> Result<Mode> {
-            Ok(self.mode)
-        }
-        fn encrypt(&self, p: &[u8], a: &[u8]) -> Result<Vec<u8>> {
-            self.inner.encrypt(p, a)
-        }
-        fn decrypt(&self, c: &[u8], a: &[u8]) -> Result<Vec<u8>> {
-            self.inner.decrypt(c, a)
-        }
-        fn mac(&self, d: &[u8]) -> Result<Vec<u8>> {
-            self.inner.mac(d)
-        }
-        fn get(&self, k: &str) -> Result<Option<Vec<u8>>> {
-            self.inner.get(k)
-        }
-        fn set(&self, k: &str, v: &[u8]) -> Result<()> {
-            self.inner.set(k, v)
-        }
-        fn set_if_absent(&self, k: &str, v: &[u8]) -> Result<bool> {
-            self.pause(k)?;
-            self.inner.set_if_absent(k, v)
-        }
-        fn compare_and_swap(&self, k: &str, e: &[u8], v: &[u8]) -> Result<bool> {
-            self.pause(k)?;
-            self.inner.compare_and_swap(k, e, v)
-        }
-        fn delete(&self, k: &str) -> Result<bool> {
-            self.inner.delete(k)
         }
     }
 }

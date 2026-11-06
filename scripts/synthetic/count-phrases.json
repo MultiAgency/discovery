@@ -1,0 +1,22 @@
+{
+  "counted": [
+    "Feedback came from two human respondents and a test harness.",
+    "Two respondents separately asked for earlier local checks.",
+    "Most responses were synthetic workload text.",
+    "3 participants hit the same error.",
+    "Both agents retried after the remote error.",
+    "Several people wanted clearer deadlines.",
+    "Two of the respondents stopped early.",
+    "A handful of responses mentioned proxies.",
+    "Neither participant used a wallet.",
+    "Two-respondent split."
+  ],
+  "uncounted": [
+    "Joining a survey breaks down in two places.",
+    "Many agentic workflows need humans in the loop.",
+    "One personal access token is enough.",
+    "Agents retry blindly when the error is remote.",
+    "Affects a maintainer of a language binding.",
+    "Affects a synthetic workload respondent."
+  ]
+}

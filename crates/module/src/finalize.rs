@@ -38,10 +38,11 @@ pub fn finalize<P: Platform, L: Llm>(p: &P, llm: &L, survey_id: &str) -> Result<
     let records = Records(p);
     if let Some(stored) = records.get(&report_key(survey_id))? {
         // A run may have stored the report and died before discarding.
-        collection::discard(p, survey_id)?;
+        collection::discard(p, survey_id, None)?;
         return Ok(serde_json::from_slice(&stored)?);
     }
-    let responses = collection::freeze(p, survey_id)?;
+    let frozen = collection::freeze(p, survey_id)?;
+    let responses = &frozen.submissions;
     let (status, body) = if responses.is_empty() {
         (
             Status::Released,
@@ -51,7 +52,7 @@ pub fn finalize<P: Platform, L: Llm>(p: &P, llm: &L, survey_id: &str) -> Result<
             },
         )
     } else {
-        match synthesize_checked(llm, &definition, &responses)? {
+        match synthesize_checked(llm, &definition, responses)? {
             Some(body) => (Status::Released, body),
             None => (Status::Withheld, Body::default()),
         }
@@ -67,7 +68,7 @@ pub fn finalize<P: Platform, L: Llm>(p: &P, llm: &L, survey_id: &str) -> Result<
     records.set_if_absent(&report_key(survey_id), &serde_json::to_vec(&report)?)?;
     let stored: Report =
         serde_json::from_slice(&records.require(&report_key(survey_id), "report")?)?;
-    collection::discard(p, survey_id)?;
+    collection::discard(p, survey_id, Some(&frozen))?;
     Ok(stored)
 }
 
@@ -255,11 +256,10 @@ Return exactly {\"leaks\":[\"description of each leak\"]}, with an empty list if
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::interleaving::View;
     use crate::platform::memory::Memory;
-    use crate::survey::fixtures::{definition, encrypt, NOW};
-    use crate::survey::{init, responses_prefix, secret_key, submit};
-    use discovery_protocol::response::{Answer, Basis, Disclosure};
+    use crate::survey::fixtures::{created, response, send, DEADLINE};
+    use crate::survey::{responses_prefix, secret_key};
+    use discovery_protocol::response::{Basis, Disclosure};
     use std::cell::RefCell;
 
     fn is_audit(system: &str) -> bool {
@@ -301,46 +301,42 @@ mod tests {
                 "disagreements": [], "open_questions": [], "acceptance_criteria": [] })
     }
 
-    fn setup() -> (Memory, String, SurveyDefinition) {
-        let d = definition();
-        let m = Memory::new(Mode::Near { block_ns: NOW });
-        let created = init(&m, d.clone()).unwrap();
+    /// Three context-only answers, observed, with an approved phrasing.
+    fn setup() -> (Memory<'static>, String) {
+        let phrasing = Some("a maintainer of a language binding".into());
+        setup_with(Basis::Observed, Disclosure::ContextOnly { phrasing })
+    }
+
+    fn setup_with(basis: Basis, disclosure: Disclosure) -> (Memory<'static>, String) {
+        let (m, c) = created();
         for text in [
             "I maintain the only Rust bindings for Velvet and setup failed twice",
             "I maintain the only Rust bindings for Velvet and setup failed twice!",
             "Setup should list missing variables first",
         ] {
-            let response = Response {
-                answers: vec![Answer {
-                    question_id: "q".into(),
-                    basis: Basis::Observed,
-                    disclosure: Disclosure::ContextOnly {
-                        phrasing: Some("a maintainer of a language binding".into()),
-                    },
-                    text: text.into(),
-                }],
-            };
-            submit(
-                &View::new(&m, Mode::Https),
-                &created.survey_id,
-                &encrypt(&created, &d, &response),
-            )
-            .unwrap();
+            send(&m, &c, &response(basis, disclosure.clone(), text)).unwrap();
         }
-        (m, created.survey_id, d)
+        (m, c.survey_id)
     }
 
-    fn at(m: &Memory, block_ns: u64) -> Memory {
-        Memory {
-            mode: Mode::Near { block_ns },
-            store: m.store.clone(),
+    /// A copy of `m`'s storage, finalizing after the deadline.
+    fn after_deadline(m: &Memory) -> Memory<'static> {
+        Memory::with_store(Mode::Near { block_ns: DEADLINE }, m.store.borrow().clone())
+    }
+
+    /// Restore response and key contents, as a crash after storing the report would leave them.
+    fn restore(m: &Memory, id: &str, snapshot: std::collections::BTreeMap<String, Vec<u8>>) {
+        for (key, value) in snapshot {
+            if key.starts_with(&responses_prefix(id)) || key == secret_key(id) {
+                m.set(&key, &value).unwrap();
+            }
         }
     }
 
     #[test]
     fn releases_once_and_discards() {
-        let (m, id, _) = setup();
-        let late = at(&m, NOW + 100);
+        let (m, id) = setup();
+        let late = after_deadline(&m);
         let llm = Fake::new(vec![body(
             "A language binding maintainer hit setup failures.",
         )]);
@@ -359,8 +355,8 @@ mod tests {
 
     #[test]
     fn leak_retries_then_withholds() {
-        let (m, id, _) = setup();
-        let late = at(&m, NOW + 100);
+        let (m, id) = setup();
+        let late = after_deadline(&m);
         let leak = "Someone said I maintain the only Rust bindings for Velvet";
         let llm = Fake::new(vec![body(leak); ATTEMPTS]);
         let r = finalize(&late, &llm, &id).unwrap();
@@ -385,8 +381,8 @@ mod tests {
 
     #[test]
     fn audit_sees_what_was_authorized() {
-        let (m, id, _) = setup();
-        let late = at(&m, NOW + 100);
+        let (m, id) = setup();
+        let late = after_deadline(&m);
         let llm = Fake::new(vec![body("A language binding maintainer was affected.")]);
         finalize(&late, &llm, &id).unwrap();
         let calls = llm.calls.borrow();
@@ -419,8 +415,8 @@ mod tests {
                 })
             }
         }
-        let (m, id, _) = setup();
-        let late = at(&m, NOW + 100);
+        let (m, id) = setup();
+        let late = after_deadline(&m);
         assert_eq!(
             finalize(&late, &NoVerdict, &id).unwrap().status,
             Status::Withheld
@@ -433,8 +429,8 @@ mod tests {
             body("the only Rust bindings for Velvet and setup"),
             Value::Null,
         ] {
-            let (m, id, _) = setup();
-            let late = at(&m, NOW + 100);
+            let (m, id) = setup();
+            let late = after_deadline(&m);
             let llm = Fake::new(vec![
                 rejected,
                 body("A language binding maintainer was affected."),
@@ -447,14 +443,14 @@ mod tests {
     /// so, while cited criteria are accepted with their private labels dropped.
     #[test]
     fn format_mismatch_retry_names_the_field() {
-        let (m, id, _) = setup();
+        let (m, id) = setup();
         let mut objects = body("A language binding maintainer was affected.");
         objects["open_questions"] = json!([{"question": "q"}]);
         let mut cited = body("A language binding maintainer was affected.");
         cited["acceptance_criteria"] =
             json!([{"criterion": "c", "change": "h", "rationale": "r", "source_ids": ["S1.1"]}]);
         let llm = Fake::new(vec![objects, cited]);
-        let report = finalize(&at(&m, NOW + 100), &llm, &id).unwrap();
+        let report = finalize(&after_deadline(&m), &llm, &id).unwrap();
         assert_eq!(report.status, Status::Released);
         assert_eq!(report.body.acceptance_criteria[0].criterion, "c");
         assert!(!serde_json::to_string(&report).unwrap().contains("S1.1"));
@@ -469,23 +465,17 @@ mod tests {
     #[test]
     fn confidential_model_is_unneeded_for_rejected_empty_and_completed_runs() {
         use crate::nearai::Confidential;
-        let (m, id, d) = setup();
+        let (m, id) = setup();
         // These use the real lazy adapter, with no model call or attestation.
         assert!(finalize(&m, &Confidential::new(), &id).is_err());
-        let https = Memory {
-            mode: Mode::Https,
-            store: m.store.clone(),
-        };
-        assert!(finalize(&https, &Confidential::new(), &id).is_err());
+        assert!(finalize(&m.view(Mode::Https), &Confidential::new(), &id).is_err());
 
-        let empty = Memory::new(Mode::Near { block_ns: NOW });
-        init(&empty, d).unwrap();
-        let empty = at(&empty, NOW + 100);
+        let empty = after_deadline(&created().0);
         let report = finalize(&empty, &Confidential::new(), &id).unwrap();
         assert_eq!(report.status, Status::Released);
         collection::assert_discarded(&empty, &id);
 
-        let late = at(&m, NOW + 100);
+        let late = after_deadline(&m);
         let report = finalize(
             &late,
             &Fake::new(vec![body("A language binding maintainer was affected.")]),
@@ -501,7 +491,7 @@ mod tests {
     fn competing_finalizers_return_only_the_winning_report() {
         use std::cell::Cell;
         struct Competing<'a> {
-            p: &'a Memory,
+            p: &'a Memory<'a>,
             id: &'a str,
             started: Cell<bool>,
         }
@@ -523,8 +513,8 @@ mod tests {
                 Ok(body("A language binding maintainer reported a failure."))
             }
         }
-        let (m, id, _) = setup();
-        let late = at(&m, NOW + 100);
+        let (m, id) = setup();
+        let late = after_deadline(&m);
         let llm = Competing {
             p: &late,
             id: &id,
@@ -540,9 +530,8 @@ mod tests {
 
     #[test]
     fn interrupted_cleanup_resumes_from_the_stored_report_without_inference() {
-        use crate::platform::interleaving::View;
-        let (m, id, _) = setup();
-        let late = at(&m, NOW + 100);
+        let (m, id) = setup();
+        let late = after_deadline(&m);
         let snapshot = late.store.borrow().clone();
         let report = finalize(
             &late,
@@ -550,19 +539,9 @@ mod tests {
             &id,
         )
         .unwrap();
-        // A crash just after report persistence left response/key contents.
-        for (key, value) in snapshot {
-            if key.starts_with(&responses_prefix(&id)) || key == secret_key(&id) {
-                late.set(&key, &value).unwrap();
-            }
-        }
+        restore(&late, &id, snapshot);
         let slots = late.list(&responses_prefix(&id));
-        let mut failing = View::new(
-            &late,
-            Mode::Near {
-                block_ns: NOW + 100,
-            },
-        );
+        let mut failing = late.view(late.mode);
         failing.prefix = slots[1].clone();
         failing.failures.set(1);
         assert!(finalize(&failing, &crate::nearai::Confidential::new(), &id).is_err());
@@ -578,14 +557,92 @@ mod tests {
         collection::assert_discarded(&late, &id);
     }
 
+    /// OutLayer failed runs on their 126th storage call, so every finalization
+    /// path at full capacity must stay within 100: stored responses, fresh and
+    /// with cleanup resumed after a crash; empty registrations; and every slot
+    /// racing a delayed writer while it is frozen.
+    #[test]
+    fn full_capacity_finalization_stays_within_the_storage_call_budget() {
+        const CALLS_PER_RUN: usize = 100;
+        let places = collection::REGISTRATIONS;
+        let text = |i: u64| format!("Response {i}: setup failed before any local check.");
+        let model = || Fake::new(vec![body("Setup fails before local checks.")]);
+
+        // Stored responses, then cleanup resumed with every response restored.
+        let (m, c) = created();
+        for i in 0..places {
+            send(
+                &m,
+                &c,
+                &response(Basis::Observed, Disclosure::Publishable, &text(i)),
+            )
+            .unwrap();
+        }
+        let late = after_deadline(&m);
+        let snapshot = late.store.borrow().clone();
+        let report = finalize(&late, &model(), &c.survey_id).unwrap();
+        assert_eq!(report.status, Status::Released);
+        let stored = late.calls.get();
+        collection::assert_discarded(&late, &c.survey_id);
+        restore(&late, &c.survey_id, snapshot);
+        late.calls.set(0);
+        assert_eq!(
+            finalize(&late, &Fake::new(vec![]), &c.survey_id).unwrap(),
+            report
+        );
+        let resumed = late.calls.get();
+        collection::assert_discarded(&late, &c.survey_id);
+
+        // Registrations whose writers never inserted, then the same slots with
+        // each writer inserting just before freezing marks it.
+        let mut racing_calls = [0; 2];
+        for (racing, calls) in [false, true].into_iter().zip(&mut racing_calls) {
+            let (m, c) = created();
+            let late = after_deadline(&m);
+            let mut writes = std::collections::BTreeMap::new();
+            for i in 0..places {
+                let slot = format!("{}admitted-{i}", responses_prefix(&c.survey_id));
+                collection::register(&late, &c.survey_id, &slot).unwrap();
+                let submission = response(Basis::Observed, Disclosure::Publishable, &text(i));
+                let open =
+                    collection::seal_slot(&late, &slot, &collection::Slot::Open { submission })
+                        .unwrap();
+                writes.insert(slot, open);
+            }
+            late.calls.set(0);
+            let mut writers = late.view(late.mode);
+            if racing {
+                writers.prefix = responses_prefix(&c.survey_id);
+                writers.before_write = Box::new(|key| {
+                    if let Some(write) = writes.get(key) {
+                        late.store
+                            .borrow_mut()
+                            .entry(key.into())
+                            .or_insert(write.clone());
+                    }
+                });
+            }
+            let report = finalize(&writers, &model(), &c.survey_id).unwrap();
+            *calls = late.calls.get();
+            assert_eq!(report.status, Status::Released);
+            collection::assert_discarded(&late, &c.survey_id);
+        }
+        let [empty, racing] = racing_calls;
+        println!("storage calls at {places} registrations: stored {stored}, resumed {resumed}, empty {empty}, racing {racing}");
+        for (path, calls) in [
+            ("stored", stored),
+            ("resumed", resumed),
+            ("empty", empty),
+            ("racing", racing),
+        ] {
+            assert!(calls <= CALLS_PER_RUN, "{path}: {calls} calls");
+        }
+    }
+
     #[test]
     fn report_basis_is_derived_and_private_provenance_is_never_published() {
-        let (m, id, _) = setup();
-        for key in m.list(&responses_prefix(&id)) {
-            let mut sub = collection::test_submission(&m, &key);
-            sub.answers[0].basis = Basis::Interpretation;
-            collection::test_store(&m, &key, sub);
-        }
+        let phrasing = Some("a maintainer of a language binding".into());
+        let (m, id) = setup_with(Basis::Interpretation, Disclosure::ContextOnly { phrasing });
         let mut draft = body("A language binding maintainer was affected.");
         draft["findings"][0]["basis"] = json!(["confirmed"]);
         assert!(serde_json::from_value::<Draft>(draft.clone()).is_err());
@@ -593,7 +650,7 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("basis");
-        let report = finalize(&at(&m, NOW + 100), &Fake::new(vec![draft]), &id).unwrap();
+        let report = finalize(&after_deadline(&m), &Fake::new(vec![draft]), &id).unwrap();
         assert_eq!(report.status, Status::Released);
         assert_eq!(report.body.findings[0].basis, vec![Basis::Interpretation]);
         let json = serde_json::to_string(&report).unwrap();
@@ -604,29 +661,82 @@ mod tests {
     #[test]
     fn unauthorized_or_invented_sources_withhold_the_report() {
         for unauthorized in [false, true] {
-            let (m, id, _) = setup();
-            if unauthorized {
-                for key in m.list(&responses_prefix(&id)) {
-                    let mut sub = collection::test_submission(&m, &key);
-                    sub.answers[0].disclosure = Disclosure::ContextOnly { phrasing: None };
-                    collection::test_store(&m, &key, sub);
-                }
-            }
+            let (m, id) = if unauthorized {
+                setup_with(Basis::Observed, Disclosure::ContextOnly { phrasing: None })
+            } else {
+                setup()
+            };
             let mut draft = body("A language binding maintainer was affected.");
             if !unauthorized {
                 draft["findings"][0]["source_ids"] = json!(["S999.1"]);
             }
             let report =
-                finalize(&at(&m, NOW + 100), &Fake::new(vec![draft; ATTEMPTS]), &id).unwrap();
+                finalize(&after_deadline(&m), &Fake::new(vec![draft; ATTEMPTS]), &id).unwrap();
             assert_eq!(report.status, Status::Withheld);
         }
     }
 
+    /// A count in any public field follows the retry/withhold path. The
+    /// phrases are ones a deployed synthetic report published.
+    #[test]
+    fn respondent_counts_in_any_public_field_retry_then_withhold() {
+        let counted = |field: &str| {
+            let mut draft = body("A language binding maintainer was affected.");
+            let criterion = |part: &str| {
+                let mut c = json!({"criterion": "Setup", "change": "List missing settings first.",
+                    "rationale": "Remote errors come too late."});
+                c[part] = json!("Two respondents separately asked for this.");
+                json!([c])
+            };
+            match field {
+                "summary" => draft["summary"] = json!("Feedback came from two human respondents."),
+                "finding" => {
+                    draft["findings"][0]["statement"] = json!("Most responses were synthetic.")
+                }
+                "disagreement" => draft["disagreements"] = json!(["Most responses disagreed."]),
+                "open question" => {
+                    draft["open_questions"] = json!(["Why did two human respondents stop?"])
+                }
+                part => draft["acceptance_criteria"] = criterion(part),
+            }
+            draft
+        };
+        let fields = [
+            "summary",
+            "finding",
+            "disagreement",
+            "open question",
+            "criterion",
+            "change",
+            "rationale",
+        ];
+        for field in fields {
+            let (m, id) = setup();
+            let llm = Fake::new(vec![counted(field); ATTEMPTS]);
+            let report = finalize(&after_deadline(&m), &llm, &id).unwrap();
+            assert_eq!(report.status, Status::Withheld, "{field}");
+            assert!(
+                llm.calls.borrow()[1].contains("states how many responded"),
+                "{field}"
+            );
+            assert!(!serde_json::to_string(&report)
+                .unwrap()
+                .contains("states how many"));
+        }
+        let (m, id) = setup();
+        let llm = Fake::new(vec![
+            counted("summary"),
+            body("A language binding maintainer was affected."),
+        ]);
+        let report = finalize(&after_deadline(&m), &llm, &id).unwrap();
+        assert_eq!(report.status, Status::Released);
+    }
+
     #[test]
     fn private_source_references_in_narrative_are_rejected() {
-        let (m, id, _) = setup();
+        let (m, id) = setup();
         let draft = body("S1.1 reported a setup failure.");
-        let report = finalize(&at(&m, NOW + 100), &Fake::new(vec![draft; ATTEMPTS]), &id).unwrap();
+        let report = finalize(&after_deadline(&m), &Fake::new(vec![draft; ATTEMPTS]), &id).unwrap();
         assert_eq!(report.status, Status::Withheld);
     }
 }

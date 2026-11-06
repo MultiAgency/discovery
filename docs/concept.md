@@ -4,6 +4,11 @@
 
 Working concept and hackathon MVP · November 4, 2026. Product name to be decided.
 
+The [main demo](demo.md) lets anyone follow a shared invitation link to try
+Discovery with their agent, submit approved feedback privately, and see
+permitted findings become actionable GitHub issues. The invitation can live
+anywhere; each survey currently uses a GitHub issue as its report destination.
+
 ## 1. Problem
 
 Organizations need useful context from people without requiring them to expose their individual answers or underlying personal data to the survey organizer.
@@ -34,8 +39,8 @@ The first application demonstrates the shared survey workflow through GitHub:
 1. **Create a request.** The maintainer agent uses the skill and CLI to publish a machine-readable survey with an associated issue, collection deadline and disclosure terms. A link is posted on GitHub.
 2. **Prepare answers.** The personal agent follows the respondent skill, draws on authorized context and interviews its human when useful. It distinguishes confirmed answers from observations or interpretations.
 3. **Submit privately.** The CLI sends the authorized response through the confidential survey service. Individual responses and participation are not posted on GitHub.
-4. **Process the batch.** At the deadline, confidential processing synthesizes the responses and applies publication restrictions.
-5. **Publish and act.** The service posts the permitted report on the issue. The maintainer agent considers it alongside other evidence when refining or prioritizing the work.
+4. **Process the batch.** After the deadline, the organizer triggers confidential processing, which synthesizes the responses and applies publication restrictions.
+5. **Publish and act.** The organizer posts the verified report, or a withholding notice, on the issue. The maintainer agent considers it alongside other evidence when refining or prioritizing the work.
 
 ## 5. MVP scope
 
@@ -45,7 +50,7 @@ The first application demonstrates the shared survey workflow through GitHub:
 | **Respondent skill** | Guide authorized disclosure, human clarification and response preparation |
 | **CLI** | Create and inspect surveys, submit responses, check status and retrieve reports |
 | **Confidential processing service** | Protect transfer and storage, manage collection windows, analyze responses and enforce publication rules |
-| **GitHub integration** | Publish survey links and final reports on existing issues |
+| **GitHub integration** | The organizer posts survey links and verified reports on existing issues with `gh`; the service makes no GitHub calls |
 
 Survey creation, response submission and report retrieval are independent of GitHub. GitHub is the only integration demonstrated in the MVP.
 
@@ -55,7 +60,7 @@ Telemetry collection and usage verification are outside scope. Future adapters c
 
 ## 6. Privacy and NEAR architecture
 
-OutLayer runs the service and its encrypted storage in TEE-backed workers. NEAR AI provides confidential model inference. The [README](../README.md#service-policy) states exactly what each is trusted for.
+OutLayer runs the service and its encrypted storage in TEE-backed workers. NEAR AI provides confidential model inference. The [service policy](policy.md) states exactly what each is trusted for.
 
 The intended boundary is that survey organizers receive published findings without access to individual answers or underlying personal context. Transfer, storage, model calls and application logging must preserve that boundary. Intermediate data should be discarded under the agreed retention policy.
 
@@ -67,4 +72,4 @@ Reports should preserve useful themes, disagreement, uncertainty and implication
 
 The demo should complete the full request-to-report cycle and show that the report improves understanding of an existing issue—for example, by changing an acceptance criterion or exposing an incorrect assumption. It should also demonstrate that identifying material is withheld under the publication rules.
 
-The [README](../README.md#service-policy) sets the MVP's authorization, privacy promise, retention, abuse handling, synthesis checks and withholding outcome.
+The [service policy](policy.md) sets the MVP's authorization, privacy promise, retention, abuse handling, synthesis checks and withholding outcome.

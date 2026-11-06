@@ -7,7 +7,10 @@
 //! 2. contains an identifier-shaped token (email, URL, domain, NEAR account,
 //!    path, handle, long hex or number) that appears in `context_only` material
 //!    and nowhere publishable;
-//! 3. contains a term the organizer withheld.
+//! 3. contains a term the organizer withheld;
+//! 4. states how many responded: a quantity word followed, at most two words
+//!    later, by a word for respondents or responses ([`states_count`]). This
+//!    is a backstop for the prompt; it misses semantic forms ("two humans").
 
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +26,24 @@ fn words(text: &str) -> Vec<String> {
 }
 
 pub const NGRAM: usize = 6;
+
+/// Quantity words, and the whole words (or their plural) they must not
+/// count. `scripts/smoke.sh` applies the same rule to published reports.
+const QUANTITIES: [&str; 26] = [
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+    "twelve", "dozen", "both", "single", "couple", "handful", "few", "several", "many", "most",
+    "half", "majority", "minority", "none", "neither",
+];
+const COUNTED: [&str; 8] = [
+    "respondent",
+    "responder",
+    "response",
+    "participant",
+    "people",
+    "person",
+    "agent",
+    "submission",
+];
 
 /// What the checks compare a report against.
 #[derive(Default)]
@@ -143,9 +164,28 @@ impl Material {
             {
                 out.push(format!("contains the withheld term \"{t}\": remove it"));
             }
+            if let Some(phrase) = states_count(s) {
+                out.push(format!(
+                    "states how many responded (\"{phrase}\"): describe positions without counts"
+                ));
+            }
         }
         out
     }
+}
+
+/// The first phrase that counts respondents or responses, such as "two human
+/// respondents" or "most responses".
+fn states_count(text: &str) -> Option<String> {
+    let w = words(text);
+    (0..w.len()).find_map(|i| {
+        let quantity =
+            w[i].bytes().all(|b| b.is_ascii_digit()) || QUANTITIES.contains(&w[i].as_str());
+        let end = (i + 4).min(w.len());
+        let counted = |w: &str| COUNTED.contains(&w.strip_suffix('s').unwrap_or(w));
+        let noun = (i + 1..end).find(|&j| counted(&w[j]))?;
+        quantity.then(|| w[i..=noun].join(" "))
+    })
 }
 
 /// Maximal runs of words in `text` covered by forbidden n-grams.
@@ -312,6 +352,31 @@ mod tests {
         assert!(!material(rules)
             .violations(&["Something in velvet."])
             .is_empty());
+    }
+
+    /// Phrases shared with `scripts/test-smoke.sh`, which applies the same
+    /// rule to deployed reports; several were published by survey 32fac7cf….
+    #[test]
+    fn respondent_counts_fail_in_any_form() {
+        let phrases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../scripts/synthetic/count-phrases.json"
+        ))
+        .unwrap();
+        let list =
+            |kind: &str| -> Vec<String> { serde_json::from_value(phrases[kind].clone()).unwrap() };
+        let m = material(DisclosureRules::default());
+        for counted in list("counted") {
+            let reasons = m.violations(&[&counted]);
+            assert!(
+                reasons
+                    .iter()
+                    .any(|r| r.starts_with("states how many responded")),
+                "{counted}: {reasons:?}"
+            );
+        }
+        for uncounted in list("uncounted") {
+            assert!(m.violations(&[&uncounted]).is_empty(), "{uncounted}");
+        }
     }
 
     #[test]

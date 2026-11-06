@@ -1,22 +1,22 @@
 //! Local request-to-report demo: `scripts/demo.sh`.
 //!
-//! Runs the real survey, envelope, admission, publication-check, finalization
-//! and cleanup code on the synthetic fixtures in `scripts/synthetic/`. Storage,
-//! time and inference are test doubles and there are no transactions, so the
-//! result says nothing about deployed confidentiality. With
-//! `DISCOVERY_DEMO_DIR` set, it writes the transcript, the public reports and a
-//! machine-checkable `outcomes.json` there. Every outcome must pass.
+//! LOCAL SIMULATION. Runs the real survey, envelope, admission, publication
+//! check, finalization and cleanup code on the invented answers in
+//! `scripts/synthetic/`. Simulated: storage (in memory; sealing is a reversible
+//! test tag, not encryption), block time, inference (scripted drafts and audit;
+//! no model, no attestation) and transactions (none). Nothing here is
+//! chain-verified or evidence of deployed confidentiality.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
 use discovery_protocol::definition::SurveyDefinition;
 use discovery_protocol::report::{Report, Status};
 use discovery_protocol::response::{Disclosure, Response};
-use discovery_protocol::{Error, Result};
+use discovery_protocol::Result;
 use serde_json::{json, Value};
 
-use crate::collection;
 use crate::finalize::{finalize, Llm, ATTEMPTS};
 use crate::platform::memory::Memory;
 use crate::platform::Mode;
@@ -24,47 +24,35 @@ use crate::survey::fixtures::encrypt;
 use crate::survey::{init, responses_prefix, status, submit};
 
 const DEFINITION: &str = include_str!("../../../scripts/synthetic/definition.json");
-const ANSWERS: [&str; 3] = [
-    include_str!("../../../scripts/synthetic/answers1.json"),
-    include_str!("../../../scripts/synthetic/answers2.json"),
-    include_str!("../../../scripts/synthetic/answers3.json"),
+const ANSWERS: [(&str, &str); 3] = [
+    (
+        "answers1.json",
+        include_str!("../../../scripts/synthetic/answers1.json"),
+    ),
+    (
+        "answers2.json",
+        include_str!("../../../scripts/synthetic/answers2.json"),
+    ),
+    (
+        "answers3.json",
+        include_str!("../../../scripts/synthetic/answers3.json"),
+    ),
 ];
 const CONTEXT_ONLY: &str = include_str!("../../../scripts/synthetic/context-only.json");
 
-/// Every fixture answer carries this marker; no artifact may contain it.
-const MARKER: &str = "SYNTHETIC";
 const SECOND: u64 = 1_000_000_000;
 /// Simulated block time at creation.
 const T0: u64 = 1_800_000_000 * SECOND;
 const DEADLINE: u64 = T0 + 3_600 * SECOND;
+const LABEL: &str = "> LOCAL SIMULATION with invented answers, scripted inference and in-memory \
+storage; not chain-verified.";
 
-const PROVENANCE: &str = "LOCAL SIMULATION. Real code: survey definitions and hashing, \
-X25519/XChaCha20-Poly1305 response envelopes, admission, deduplication, freezing, publication \
-checks, finalization and cleanup. Simulated: storage (in memory; sealing is a reversible test \
-tag, not encryption), time (fixed block timestamps), inference (scripted drafts and audit; no \
-model, no attestation) and transactions (none). Nothing here is chain-verified or evidence of \
-deployed confidentiality.";
+type Draft = fn(&Value) -> Value;
 
-type Draft = Box<dyn Fn(&Value) -> Value>;
-
-/// Scripted stand-in for the confidential model. Drafts read the synthesis
-/// input, as a model would, to cite the private source labels of answers.
+/// Scripted stand-in for the confidential model: it replays drafts in order
+/// and its audit finds no leaks, so only the mechanical checks reject.
 struct Scripted {
     drafts: RefCell<Vec<Draft>>,
-    /// (kind, input) for every call.
-    calls: RefCell<Vec<(&'static str, Value)>>,
-}
-
-impl Scripted {
-    fn new(drafts: Vec<Draft>) -> Self {
-        Self {
-            drafts: RefCell::new(drafts),
-            calls: RefCell::default(),
-        }
-    }
-    fn count(&self, kind: &str) -> usize {
-        self.calls.borrow().iter().filter(|c| c.0 == kind).count()
-    }
 }
 
 impl Llm for Scripted {
@@ -72,22 +60,22 @@ impl Llm for Scripted {
         "scripted-local-drafts (no model)"
     }
     fn json(&self, system: &str, user: &str) -> Result<Value> {
-        let input: Value = serde_json::from_str(user)?;
         if system.starts_with("You audit a report") {
-            self.calls.borrow_mut().push(("audit", input));
             return Ok(json!({ "leaks": [] }));
         }
-        self.calls.borrow_mut().push(("draft", input.clone()));
-        if self.drafts.borrow().is_empty() {
-            return Err(Error("scripted model has no draft left".into()));
-        }
         let draft = self.drafts.borrow_mut().remove(0);
-        Ok(draft(&input))
+        Ok(draft(&serde_json::from_str(user)?))
     }
 }
 
-/// Private source labels of authorized answers matching `question` and `basis`:
-/// publishable, or context-only with an approved phrasing.
+fn scripted(drafts: Vec<Draft>) -> Scripted {
+    Scripted {
+        drafts: RefCell::new(drafts),
+    }
+}
+
+/// Private source labels of authorized answers matching `question` and `basis`,
+/// read from the synthesis input as a model would.
 fn cite(input: &Value, question: &str, basis: &str) -> Vec<String> {
     let respondents = input["respondents"].as_array().into_iter().flatten();
     respondents
@@ -123,7 +111,7 @@ fn clean_draft(input: &Value) -> Value {
     })
 }
 
-/// Same draft, but the summary names a context-only host.
+/// The clean draft, but its summary names a context-only host.
 fn leaking_draft(input: &Value) -> Value {
     let mut draft = clean_draft(input);
     draft["summary"] = json!(
@@ -132,369 +120,170 @@ fn leaking_draft(input: &Value) -> Value {
     draft
 }
 
-fn withheld_draft(_: &Value) -> Value {
-    json!({ "summary": "Verification fails on qa-runner-3.internal.example.invalid behind a proxy.",
-        "findings": [], "disagreements": [], "open_questions": [], "acceptance_criteria": [] })
+/// The permissions a fixture encodes, without its private text. Owner
+/// approval is simulated; this demo neither obtains nor verifies it.
+fn print_permissions(name: &str, response: &Response) {
+    println!("  {name}, approved permissions:");
+    for a in &response.answers {
+        let surfaces = match &a.disclosure {
+            Disclosure::Publishable => "publishable, paraphrased".into(),
+            Disclosure::ContextOnly { phrasing: Some(p) } => {
+                format!("context-only, may appear only as \"{p}\"")
+            }
+            Disclosure::ContextOnly { phrasing: None } => "context-only, never stated".into(),
+        };
+        let basis = serde_json::to_value(a.basis).unwrap();
+        println!(
+            "    {:<9} {:<15} {surfaces}",
+            a.question_id,
+            basis.as_str().unwrap()
+        );
+    }
 }
 
-/// Identifier-shaped tokens of all context-only fixture text.
-fn confidential_identifiers(responses: &[Response]) -> BTreeSet<String> {
-    responses
-        .iter()
-        .flat_map(|r| &r.answers)
-        .filter(|a| matches!(a.disclosure, Disclosure::ContextOnly { .. }))
-        .flat_map(|a| crate::checks::identifiers(&a.text))
-        .collect()
-}
-
-/// Problems that make `text` unfit for a public artifact.
-fn public_problems(text: &str, identifiers: &BTreeSet<String>) -> Vec<String> {
-    let lower = text.to_lowercase();
-    let mut out: Vec<String> = identifiers
-        .iter()
-        .filter(|id| lower.contains(id.as_str()))
-        .map(|_| "confidential identifier".into())
-        .collect();
-    if text.contains(MARKER) {
-        out.push("fixture text".into());
-    }
-    let bytes = text.as_bytes();
-    if bytes
-        .windows(4)
-        .any(|w| w[0] == b'S' && w[1].is_ascii_digit() && w[2] == b'.' && w[3].is_ascii_digit())
-    {
-        out.push("private source label".into());
-    }
-    for detail in [
-        "reuses confidential",
-        "confidential identifier",
-        "audit:",
-        "rejected",
-    ] {
-        if lower.contains(detail) {
-            out.push("rejection detail".into());
+/// A public report must hold no fixture text, context-only identifier or
+/// private source label.
+fn assert_public(markdown: &str, responses: &[Response]) {
+    assert!(!markdown.contains("SYNTHETIC"), "fixture text");
+    for answer in responses.iter().flat_map(|r| &r.answers) {
+        if matches!(answer.disclosure, Disclosure::ContextOnly { .. }) {
+            for id in crate::checks::identifiers(&answer.text) {
+                assert!(!markdown.to_lowercase().contains(&id), "identifier {id}");
+            }
         }
     }
-    let words: Vec<&str> = lower
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .collect();
-    let numbers = [
-        "one", "two", "three", "four", "five", "several", "many", "most",
-    ];
-    let counted = [
-        "respond",
-        "participant",
-        "people",
-        "person",
-        "agent",
-        "submission",
-    ];
-    if words.windows(2).any(|w| {
-        (w[0].bytes().all(|b| b.is_ascii_digit()) || numbers.contains(&w[0]))
-            && counted.iter().any(|c| w[1].starts_with(c))
-    }) {
-        out.push("respondent count".into());
-    }
-    out
-}
-
-struct Demo {
-    transcript: Vec<String>,
-    outcomes: Vec<Value>,
-}
-
-impl Demo {
-    fn say(&mut self, line: impl Into<String>) {
-        self.transcript.push(line.into());
-    }
-    fn outcome(&mut self, id: &str, name: &str, pass: bool, observed: Value) {
-        self.say(format!(
-            "  [{}] outcome {id}: {name}",
-            if pass { "pass" } else { "FAIL" }
-        ));
-        self.outcomes
-            .push(json!({ "id": id, "name": name, "pass": pass, "observed": observed }));
-    }
+    let label = markdown
+        .as_bytes()
+        .windows(4)
+        .any(|w| w[0] == b'S' && w[1].is_ascii_digit() && w[2] == b'.' && w[3].is_ascii_digit());
+    assert!(!label, "private source label");
 }
 
 fn local_report(report: &Report) -> String {
-    format!(
-        "> {PROVENANCE}\n\n{}\n---\nLocal simulation: no finalize transaction, not chain-verified.\n",
-        report.markdown()
-    )
+    format!("{LABEL}\n\n{}", report.markdown())
 }
 
 fn parse<T: serde::de::DeserializeOwned>(text: &str) -> T {
     serde_json::from_str(text).expect("valid fixture")
 }
 
+fn at(p: &Memory, block_ns: u64) -> Memory<'static> {
+    p.view(Mode::Near { block_ns })
+}
+
 #[test]
 fn local_demo() {
-    let mut demo = Demo {
-        transcript: vec![PROVENANCE.into(), String::new()],
-        outcomes: Vec::new(),
-    };
     let mut definition: SurveyDefinition = parse(DEFINITION);
     definition.deadline_ns = DEADLINE;
-    let responses: Vec<Response> = ANSWERS.iter().map(|a| parse(a)).collect();
+    let responses: Vec<Response> = ANSWERS.iter().map(|(_, a)| parse(a)).collect();
     let context_only: Response = parse(CONTEXT_ONLY);
-    let identifiers =
-        confidential_identifiers(&[responses.clone(), vec![context_only.clone()]].concat());
-    let target = format!("{}#{}", definition.target.repo, definition.target.number);
+    println!("LOCAL SIMULATION: see crates/module/src/demo.rs for what is real and simulated.\n");
 
-    // 1. Create a survey attached to an issue (simulated on-chain call).
-    let mut p = Memory::new(Mode::Near { block_ns: T0 });
+    // 1. The maintainer creates a survey on an issue.
+    let p = Memory::new(Mode::Near { block_ns: T0 });
     let created = init(&p, definition.clone()).unwrap();
     let id = created.survey_id.clone();
-    let state = status(&p, &id).unwrap();
-    demo.say(format!(
-        "Survey {} for {target}; deadline = creation + 1 h (simulated block time)",
-        &id[..12]
-    ));
-    let open = state.key_present && !state.closed;
-    demo.outcome(
-        "1",
-        "survey created for a specific issue",
-        state.definition.target == definition.target && open,
-        json!({ "survey_id": id, "target": target, "accepting_responses": open }),
+    let target = &definition.target;
+    println!(
+        "1. Survey {} on {}#{}, deadline in one hour:",
+        &id[..12],
+        target.repo,
+        target.number
     );
+    for q in &definition.questions {
+        println!("  {}: {}", q.id, q.prompt);
+    }
 
-    // 2. Distinct responses with mixed tiers and bases, over simulated HTTPS.
-    p.mode = Mode::Https;
-    let first = encrypt(&created, &definition, &responses[0]);
-    let accepted = [&first, &encrypt(&created, &definition, &responses[1])]
+    // 2. Approved answers are encrypted to the survey key and submitted; an
+    //    identical retry is re-encrypted but stored once.
+    println!("\n2. Personal agents submit approved, encrypted answers:");
+    let https = p.view(Mode::Https);
+    let seal = |response: &Response| encrypt(&created, &definition, response);
+    let send = |envelope: &str| submit(&https, &id, envelope);
+    let mut envelopes = Vec::new();
+    for ((name, _), response) in ANSWERS[..2].iter().zip(&responses) {
+        print_permissions(name, response);
+        envelopes.push(seal(response));
+        assert!(send(envelopes.last().unwrap()).unwrap().accepted);
+    }
+    let size = |envelope: &str| B64.decode(envelope).unwrap().len();
+    let plaintext: Vec<usize> = responses[..2]
         .iter()
-        .all(|e| submit(&p, &id, e).unwrap().accepted);
-    let slots = |p: &Memory| p.list(&responses_prefix(&id)).len();
-    let tiers: BTreeSet<_> = responses[..2]
-        .iter()
-        .flat_map(|r| &r.answers)
-        .map(|a| match &a.disclosure {
-            Disclosure::Publishable => "publishable",
-            Disclosure::ContextOnly { phrasing: Some(_) } => "context_only with phrasing",
-            Disclosure::ContextOnly { phrasing: None } => "context_only without phrasing",
-        })
+        .map(|r| serde_json::to_vec(r).unwrap().len())
         .collect();
-    let bases: BTreeSet<_> = responses[..2]
-        .iter()
-        .flat_map(|r| &r.answers)
-        .map(|a| a.basis)
-        .collect();
-    demo.say("answers1.json and answers2.json are encrypted to the survey key and submitted.");
-    demo.outcome(
-        "2",
-        "distinct responses with mixed tiers and bases accepted",
-        accepted && slots(&p) == 2 && tiers.len() == 3 && bases.len() == 3,
-        json!({ "stored_responses": slots(&p), "tiers": tiers, "bases": bases }),
+    let sealed: Vec<usize> = envelopes.iter().map(|e| size(e)).collect();
+    assert!(plaintext[0] != plaintext[1] && sealed[0] == sealed[1]);
+    println!(
+        "  Answers of {} and {} bytes both seal to {}-byte envelopes.",
+        plaintext[0], plaintext[1], sealed[0]
     );
+    let resent = seal(&responses[0]);
+    assert_ne!(resent, envelopes[0]);
+    assert!(send(&resent).unwrap().accepted);
+    println!("  answers1.json is retried with fresh ciphertext and counted once.");
+    assert_eq!(p.list(&responses_prefix(&id)).len(), 2);
 
-    // 3. A retry with identical answers is re-encrypted and contributes once.
-    let retry = encrypt(&created, &definition, &responses[0]);
-    let retried = submit(&p, &id, &retry).unwrap().accepted;
-    demo.say("answers1.json is submitted again; the CLI encrypts it afresh.");
-    demo.outcome(
-        "3",
-        "identical retry re-encrypted and counted once",
-        retried && retry != first && slots(&p) == 2,
-        json!({ "fresh_ciphertext": retry != first, "stored_responses": slots(&p) }),
-    );
+    // 3. The deadline is the earliest finalization, not the end of collection.
+    let early = finalize(&at(&p, DEADLINE - SECOND), &scripted(vec![]), &id).unwrap_err();
+    assert_eq!(early.0, "the collection period has not ended");
+    println!("\n3. Finalizing early is refused; answers3.json arrives after the deadline and is accepted.");
+    print_permissions(ANSWERS[2].0, &responses[2]);
+    let late = seal(&responses[2]);
+    assert_eq!(size(&late), sealed[0]);
+    assert!(send(&late).unwrap().accepted);
 
-    // 4. Finalization before the deadline is refused, before any inference.
-    let model = Scripted::new(vec![Box::new(leaking_draft), Box::new(clean_draft)]);
-    p.mode = Mode::Near {
-        block_ns: DEADLINE - SECOND,
-    };
-    let early = finalize(&p, &model, &id).unwrap_err();
-    let open = !status(&p, &id).unwrap().closed;
-    demo.say("The organizer tries to finalize one second before the deadline.");
-    demo.outcome(
-        "4",
-        "finalization before the deadline rejected",
-        early.0 == "the collection period has not ended" && model.calls.borrow().is_empty() && open,
-        json!({ "error": early.0, "model_calls": model.calls.borrow().len(), "still_open": open }),
-    );
-
-    // 5. The deadline alone does not close collection.
-    p.mode = Mode::Near {
-        block_ns: DEADLINE + 60 * SECOND,
-    };
-    let after = status(&p, &id).unwrap();
-    p.mode = Mode::Https;
-    let late = submit(&p, &id, &encrypt(&created, &definition, &responses[2]))
-        .unwrap()
-        .accepted;
-    demo.say("A minute after the deadline, answers3.json is submitted; nobody has finalized yet.");
-    let open = !after.closed && after.key_present;
-    demo.outcome(
-        "5",
-        "deadline passed but submissions still accepted",
-        open && late && slots(&p) == 3,
-        json!({ "open_after_deadline": open, "late_submission_accepted": late,
-            "stored_responses": slots(&p) }),
-    );
-
-    // 6–7a. Finalize: the leaking draft is rejected, the corrected one released.
-    p.mode = Mode::Near {
-        block_ns: DEADLINE + 120 * SECOND,
-    };
-    let report = finalize(&p, &model, &id).unwrap();
-    let markdown = local_report(&report);
-    let problems = public_problems(&markdown, &identifiers);
-    let findings: Vec<Value> = report
-        .body
-        .findings
-        .iter()
-        .map(|f| json!({ "basis": f.basis }))
-        .collect();
-    let criteria = report.body.acceptance_criteria.len();
-    demo.say("The organizer finalizes after the deadline.");
-    let grounded = report.body.findings.iter().all(|f| !f.basis.is_empty());
-    demo.outcome(
-        "6",
-        "useful report with grounded acceptance-criterion changes",
-        report.status == Status::Released
-            && report.target == definition.target
-            && criteria >= 1
-            && grounded
-            && problems.is_empty(),
-        json!({ "status": report.status, "findings": findings,
-            "acceptance_criteria_changes": criteria, "public_problems": problems }),
-    );
-    let calls = model.calls.borrow();
-    let inputs: Vec<&Value> = calls
-        .iter()
-        .filter(|c| c.0 == "draft")
-        .map(|c| &c.1)
-        .collect();
-    let reasons = inputs.get(1).map_or(json!([]), |i| {
-        i["previous_attempt_rejected_because"].clone()
-    });
-    let named_identifier = reasons.as_array().into_iter().flatten().any(|r| {
-        r.as_str()
-            .unwrap_or_default()
-            .contains("confidential identifier")
-    });
-    let contributors = inputs
-        .first()
-        .map_or(0, |i| i["respondents"].as_array().map_or(0, Vec::len));
-    drop(calls);
-    demo.say(
-        "  Draft 1 named a context-only host and was rejected; the reasons went back to \
-         the model only. Draft 2 passed the checks and the (scripted) audit.",
-    );
-    demo.outcome(
-        "7a",
-        "confidential draft rejected, corrected draft released",
-        named_identifier && model.count("draft") == 2 && model.count("audit") == 1,
-        json!({ "draft_calls": model.count("draft"), "audit_calls": model.count("audit"),
-            "rejection_kind": if named_identifier { "confidential identifier" } else { "other" },
-            "retry_contributed_once": contributors == 3 }),
-    );
-
-    // 8. Closed, key discarded, no more submissions, retry returns the stored report.
-    collection::assert_discarded(&p, &id);
+    // 4. Finalization rejects a leaking draft, releases the corrected one,
+    //    then closes the survey and discards responses and key.
+    let model = scripted(vec![leaking_draft, clean_draft]);
+    let report = finalize(&at(&p, DEADLINE + 60 * SECOND), &model, &id).unwrap();
+    assert_eq!(report.status, Status::Released);
+    assert!(model.drafts.borrow().is_empty());
+    crate::collection::assert_discarded(&p, &id);
     let closed = status(&p, &id).unwrap();
-    let again = Scripted::new(vec![]);
-    let same = finalize(&p, &again, &id).unwrap() == report;
-    p.mode = Mode::Https;
-    let refused = submit(&p, &id, &first).unwrap_err();
-    demo.say(
-        "Afterwards the survey is closed, its key and responses are replaced by markers, \
-         and a finalization retry returns the stored report.",
+    assert!(closed.closed && !closed.key_present && closed.report_released);
+    assert_eq!(
+        send(&seal(&responses[0])).unwrap_err().0,
+        "survey is closed"
     );
-    demo.outcome(
-        "8",
-        "closure, cleanup, refusal and identical retry without inference",
-        closed.closed
-            && !closed.key_present
-            && closed.report_released
-            && refused.0 == "survey is closed"
-            && same
-            && again.calls.borrow().is_empty(),
-        json!({ "closed": closed.closed, "key_present": closed.key_present,
-            "report_released": closed.report_released, "late_submission_error": refused.0,
-            "retry_identical": same, "retry_model_calls": again.calls.borrow().len() }),
+    let retry = finalize(&at(&p, DEADLINE + 120 * SECOND), &scripted(vec![]), &id).unwrap();
+    assert_eq!(retry, report);
+    println!(
+        "\n4. Finalization: draft 1 named a context-only host and was rejected, draft 2 \
+         was released. The survey is closed, its key and responses replaced by markers, \
+         and a retry returns the same report without inference."
     );
+    let released = local_report(&report);
+    assert_public(&released, &responses);
+    println!("\n{released}");
 
-    // 7b. A separate survey: when every attempt is rejected, the report is withheld.
-    let mut withheld_definition = definition.clone();
-    withheld_definition.title = "Joining a survey through an agent (context-only answers)".into();
-    let mut q = Memory::new(Mode::Near { block_ns: T0 });
-    let other = init(&q, withheld_definition.clone()).unwrap();
-    q.mode = Mode::Https;
-    submit(
-        &q,
-        &other.survey_id,
-        &encrypt(&other, &withheld_definition, &context_only),
-    )
-    .unwrap();
-    q.mode = Mode::Near {
-        block_ns: DEADLINE + SECOND,
-    };
-    let rejected = Scripted::new(
-        (0..ATTEMPTS)
-            .map(|_| Box::new(withheld_draft) as Draft)
-            .collect(),
-    );
-    let withheld = finalize(&q, &rejected, &other.survey_id);
-    let withheld_markdown = withheld.as_ref().map(local_report).unwrap_or_default();
-    let withheld_ok = withheld
-        .as_ref()
-        .is_ok_and(|r| r.status == Status::Withheld)
-        && withheld_markdown.contains("could not be released")
-        && public_problems(&withheld_markdown, &identifiers).is_empty();
-    if withheld_ok {
-        collection::assert_discarded(&q, &other.survey_id);
-    }
-    demo.say(format!(
-        "Separate survey {}: context-only.json, with no approved phrasing. \
-         Every draft names a private host.",
-        &other.survey_id[..12]
-    ));
-    demo.outcome(
-        "7b",
-        "every rejected attempt withholds the report",
-        withheld_ok && rejected.count("draft") == ATTEMPTS,
-        json!({ "status": withheld.as_ref().map(|r| r.status).ok(),
-            "error": withheld.as_ref().err().map(|e| e.0.clone()),
-            "draft_calls": rejected.count("draft") }),
-    );
+    // 5. A separate survey whose every draft fails the checks is withheld.
+    let mut quiet = definition.clone();
+    quiet.title = "Joining a survey through an agent (context-only answers)".into();
+    let q = Memory::new(Mode::Near { block_ns: T0 });
+    let other = init(&q, quiet.clone()).unwrap();
+    let envelope = encrypt(&other, &quiet, &context_only);
+    submit(&q.view(Mode::Https), &other.survey_id, &envelope).unwrap();
+    let model = scripted(vec![leaking_draft as Draft; ATTEMPTS]);
+    let withheld = finalize(&at(&q, DEADLINE), &model, &other.survey_id).unwrap();
+    assert_eq!(withheld.status, Status::Withheld);
+    crate::collection::assert_discarded(&q, &other.survey_id);
+    println!("\n5. A survey of context-only answers without phrasings: all {ATTEMPTS} drafts fail the checks, so only a notice is published.");
+    print_permissions("context-only.json", &context_only);
+    let notice = local_report(&withheld);
+    assert_public(&notice, &[context_only]);
+    println!("\n{notice}");
+}
 
-    demo.say(String::new());
-    demo.say("Public report:");
-    demo.say(markdown.clone());
-    let transcript = demo.transcript.join("\n");
-    let outcomes = serde_json::to_string_pretty(&json!({
-        "provenance": PROVENANCE, "outcomes": demo.outcomes,
-    }))
-    .unwrap();
-    println!("{transcript}");
-    for (name, text) in [
-        ("transcript", &transcript),
-        ("outcomes.json", &outcomes),
-        ("withheld report", &withheld_markdown),
-    ] {
-        let problems = public_problems(text, &identifiers);
-        // Outcome names and error strings legitimately mention rejection.
-        let problems: Vec<_> = problems
-            .iter()
-            .filter(|p| *p != "rejection detail" || name == "withheld report")
-            .collect();
-        assert!(problems.is_empty(), "{name}: {problems:?}");
+/// The invitation must ask, word for word, the questions `discovery verify`
+/// shows for a survey created from the fixture definition.
+#[test]
+fn invitation_asks_the_fixture_questions() {
+    let invitation = include_str!("../../../docs/invitation.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let definition: SurveyDefinition = parse(DEFINITION);
+    for q in &definition.questions {
+        assert!(invitation.contains(&q.prompt), "question {}", q.id);
     }
-    if let Some(dir) = std::env::var_os("DISCOVERY_DEMO_DIR") {
-        let dir = std::path::PathBuf::from(dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        for (file, text) in [
-            ("transcript.txt", &transcript),
-            ("outcomes.json", &outcomes),
-            ("report.md", &markdown),
-            ("withheld.md", &withheld_markdown),
-        ] {
-            std::fs::write(dir.join(file), text).unwrap();
-        }
-    }
-    let failed: Vec<_> = demo.outcomes.iter().filter(|o| o["pass"] != true).collect();
-    assert!(failed.is_empty(), "failed outcomes: {failed:#?}");
 }

@@ -1,9 +1,8 @@
-.outlayer/
-.outlayer-research/
-.outlayer-organizer/
-.spike-secrets/
+.outlayer*/
 target/
+coordination/
 
-# Historical local secrets: never commit legacy credentials
+# local
+.spike-secrets/
 respondent-secret
 custody-anchor.json

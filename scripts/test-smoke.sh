@@ -105,4 +105,57 @@ expect "the saved outcome is the module output" \
   jq -e '.survey_id == "s"' "$dir/finalize-1.output.json" >/dev/null
 expect "the next finalization skips both completed attempts" test "$(next_finalize_label "$dir")" = finalize-3
 
+# check_public: the uppercase fixture marker and identifiers fail; ordinary
+# words such as an approved phrasing ("a synthetic workload respondent") pass.
+report="$tmp/report.md"
+printf 'SYNTHETIC: Setup should list every missing local setting.\n' > "$report"
+expect "a verbatim fixture marker fails" fails check_public "$report"
+printf 'Seen on qa-runner-3.internal.example.invalid.\n' > "$report"
+expect "a fixture identifier fails" fails check_public "$report"
+# The count phrases the module's tests use (crates/module/src/checks.rs).
+phrases="$repo/scripts/synthetic/count-phrases.json"
+while IFS= read -r counted; do
+  printf '%s\n' "$counted" > "$report"
+  expect "a respondent count fails: $counted" fails check_public "$report"
+done < <(jq -r '.counted[]' "$phrases")
+while IFS= read -r uncounted; do
+  printf '%s\n' "$uncounted" > "$report"
+  expect "no respondent count passes: $uncounted" succeeds check_public "$report"
+done < <(jq -r '.uncounted[]' "$phrases")
+
+# check_cli: the installed CLI must pin the release in releases.json.
+export RELEASES="$tmp/releases.json"
+printf '{"service":{"project":"o.testnet/p","release":"%s","organizer":"org.testnet"}}' \
+  "$(printf 'a%.0s' {1..64})" > "$RELEASES"
+cat > "$tmp/bin/discovery" <<'EOF2'
+#!/bin/sh
+printf '{"source":{"Project":{"project_id":"o.testnet/p","version_key":"%s"}},"secrets_ref":{"account_id":"org.testnet"}}' "$STUB_RELEASE"
+EOF2
+chmod +x "$tmp/bin/discovery"
+STUB_RELEASE=$(printf 'a%.0s' {1..64}) expect "a CLI pinning releases.json passes" succeeds check_cli
+STUB_RELEASE=$(printf 'b%.0s' {1..64}) expect "a CLI pinning another release fails" fails check_cli
+
+# fetch_report: a finalization that fails CLI verification stops the step; a
+# verified report must also pass the public checks.
+echo s > "$dir/survey_id"
+cat > "$tmp/bin/discovery" <<'EOF2'
+#!/bin/sh
+[ -z "$STUB_VERIFY_FAILS" ] || { echo "owner was not locked" >&2; exit 1; }
+printf '%s\n' "$STUB_REPORT"
+EOF2
+chmod +x "$tmp/bin/discovery"
+STUB_REPORT='Setup should list every missing local setting.' \
+  expect "a verified, clean report passes" succeeds fetch_report "$dir" HashOfTheSignedTx1111111111111111111111 "$tmp/r.md"
+STUB_VERIFY_FAILS=1 \
+  expect "an unverified finalization fails" fails fetch_report "$dir" HashOfTheSignedTx1111111111111111111111 "$tmp/r.md"
+STUB_REPORT='Seen on qa-runner-3.internal.example.invalid.' \
+  expect "a verified report with fixture identifiers fails" fails fetch_report "$dir" HashOfTheSignedTx1111111111111111111111 "$tmp/r.md"
+
+# prepare_init: no TITLE keeps the fixture's title; a TITLE replaces it.
+fixture_title=$(jq -r .title "$repo/scripts/synthetic/definition.json")
+( prepare_init "$tmp/init-a" 15 "" ) >/dev/null 2>&1
+expect "no title keeps the fixture title" test "$(jq -r .title "$tmp/init-a/definition.json")" = "$fixture_title"
+( prepare_init "$tmp/init-b" 15 "Other title" ) >/dev/null 2>&1
+expect "a title replaces it" test "$(jq -r .title "$tmp/init-b/definition.json")" = "Other title"
+
 exit "$failures"

@@ -8,7 +8,7 @@
 #   scripts/smoke.sh early NAME                     finalize before the deadline (must fail)
 #   scripts/smoke.sh submit NAME ANSWERS.json       encrypted submission (DISCOVERY_PAYMENT_KEY)
 #   scripts/smoke.sh finalize NAME                  finalize, fetch the verified report, check it
-#   scripts/smoke.sh refinalize NAME                finalize again; output must be identical
+#   scripts/smoke.sh refinalize NAME                finalize again; identical output, verified report
 #   scripts/smoke.sh check NAME                     closed, key gone, submissions refused
 #   scripts/smoke.sh status NAME LABEL              reconcile a recorded transaction
 #   scripts/smoke.sh workload COUNT DIR             COUNT distinct maximum-size answer files
@@ -20,6 +20,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SYNTHETIC="$REPO/scripts/synthetic"
+RELEASES="${RELEASES:-$REPO/releases.json}"
 WORK="${DISCOVERY_SMOKE_DIR:-$HOME/.discovery-smoke}"
 TARGET="${DISCOVERY_SMOKE_TARGET:-MultiAgency/discovery#1}"
 CONTRACT=outlayer.testnet
@@ -36,9 +37,24 @@ need() {
 
 organizer() {
   local org
-  org=$(jq -r '.service.organizer // empty' "$REPO/releases.json")
+  org=$(jq -r '.service.organizer // empty' "$RELEASES")
   [[ -n "$org" ]] || die "releases.json registers no service"
   printf '%s' "$org"
+}
+
+# check_cli: before any paid step, the installed CLI must pin the release that
+# releases.json registers. A stale install would sign for an organizer whose
+# surveys `verify` then refuses. `prepare finalize` reports the pins offline.
+check_cli() {
+  local probe
+  probe=$(discovery prepare finalize "$(printf '0%.0s' {1..64})" 2>/dev/null) ||
+    die "the installed discovery CLI registers no release; reinstall it from this checkout"
+  jq -e --slurpfile r "$RELEASES" '
+      .source.Project.project_id == $r[0].service.project
+      and .source.Project.version_key == $r[0].service.release
+      and .secrets_ref.account_id == $r[0].service.organizer' <<<"$probe" >/dev/null ||
+    die "the installed discovery CLI pins a different release than releases.json; reinstall it:
+  cargo install --locked --path $REPO/crates/cli"
 }
 
 survey_dir() {
@@ -141,13 +157,18 @@ next_finalize_label() {
 # Public-report checks that need no knowledge of private answers beyond the fixtures.
 check_public() {
   local file="$1" failed=0
-  if grep -Eiq 'SYNTHETIC|example\.invalid|/home/|team-lead|88231947|10\.20\.30\.40|qa-runner' "$file"; then
+  # The uppercase marker only appears in a verbatim copy of a fixture; the word
+  # "synthetic" may appear legitimately, e.g. in an approved phrasing.
+  if grep -Eq 'SYNTHETIC' "$file" ||
+    grep -Eiq 'example\.invalid|/home/|team-lead|88231947|10\.20\.30\.40|qa-runner' "$file"; then
     printf '  FAIL fixture text or identifier in %s\n' "$file"; failed=1
   fi
   if grep -Eq '\bS[0-9]+\.[0-9]+\b' "$file"; then
     printf '  FAIL private source label in %s\n' "$file"; failed=1
   fi
-  if grep -Eiq '\b([0-9]+|one|two|three|four|five|several|many|most) (respond|participant|people|person|agent|submission)' "$file"; then
+  # The module's publication check (crates/module/src/checks.rs) uses the same
+  # rule: a quantity word, at most two words before a word for respondents.
+  if grep -Eiq '(^|[^[:alnum:]])([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|both|single|couple|handful|few|several|many|most|half|majority|minority|none|neither)([^[:alnum:]]+[[:alnum:]]+){0,2}[^[:alnum:]]+((respondent|responder|response|participant|person|agent|submission)s?|people)([^[:alnum:]]|$)' "$file"; then
     printf '  FAIL respondent count in %s\n' "$file"; failed=1
   fi
   if grep -Eiq 'reuses confidential|confidential identifier|audit:' "$file"; then
@@ -156,10 +177,29 @@ check_public() {
   return "$failed"
 }
 
+# fetch_report DIR HASH OUT: the CLI verifies HASH against the pinned release
+# and the owner's lock at that block before printing; then the public checks.
+fetch_report() {
+  discovery --target "$TARGET" report "$(cat "$1/survey_id")" --finalize-tx "$2" > "$3" ||
+    die "finalization $2 did not verify; see the error above"
+  ok "report verified on-chain ($2): $3"
+  check_public "$3" || return 1
+  ok "no fixture text, identifiers, source labels, counts or rejection details"
+}
+
+# prepare_init DIR MINUTES TITLE: definition.json with a deadline MINUTES from
+# now, on TARGET, then the unsigned creation request.
 prepare_init() {
-  local dir="$1" survey
+  local dir="$1" survey deadline
+  [[ "$2" =~ ^[0-9]+$ ]] || die "MINUTES must be a whole number"
   mkdir -p "$dir"
-  "$SYNTHETIC/fresh-definition.sh" "$dir/definition.json" "$2" "$3" "$TARGET"
+  deadline=$(( $(date +%s) + $2 * 60 ))
+  # jq would round a nanosecond timestamp through a double, so substitute it as text.
+  jq --arg t "$3" --arg target "$TARGET" '(if $t == "" then . else .title = $t end)
+      | .target = {repo: ($target | split("#")[0]), number: ($target | split("#")[1] | tonumber)}' \
+    "$SYNTHETIC/definition.json" |
+    sed "s/\"deadline_ns\": 0,/\"deadline_ns\": ${deadline}000000000,/" > "$dir/definition.json"
+  grep -q "\"deadline_ns\": ${deadline}000000000," "$dir/definition.json" || die "failed to set deadline_ns"
   discovery --target "$TARGET" prepare init "$dir/definition.json" \
     > "$dir/init-request.json" 2> "$dir/prepare.log" || { cat "$dir/prepare.log" >&2; rm -f "$dir/init-request.json"; exit 1; }
   survey=$(sed -n 's/^survey_id: //p' "$dir/prepare.log")
@@ -169,6 +209,7 @@ prepare_init() {
 cmd_create() {
   local name="${1:?NAME}" minutes="${2:-15}" title="${3:-}" dir survey hash
   need discovery near jq curl
+  check_cli
   dir=$(survey_dir "$name")
   if [[ -e "$dir/init-request.json" ]]; then
     printf '  resuming %s; use a new NAME for a new survey\n' "$name"
@@ -193,6 +234,7 @@ cmd_create() {
 cmd_early() {
   local dir hash
   need discovery near jq curl
+  check_cli
   dir=$(survey_dir "${1:?NAME}")
   discovery prepare finalize "$(cat "$dir/survey_id")" > "$dir/early-request.json"
   hash=$(sign_and_send "$dir" early "$dir/early-request.json" '0.2 NEAR')
@@ -213,6 +255,7 @@ cmd_submit() {
 cmd_finalize() {
   local dir survey label hash deadline
   need discovery near jq curl
+  check_cli
   dir=$(survey_dir "${1:?NAME}")
   survey=$(cat "$dir/survey_id")
   deadline=$(jq -r ".deadline_ns / $SECOND | floor" "$dir/definition.json")
@@ -227,15 +270,14 @@ cmd_finalize() {
     die "finalization did not complete in $hash: $(jq -r .error "$dir/$label.output.json"); run finalize again"
   fi
   printf '%s\n' "$hash" > "$dir/finalize_tx"
-  discovery --target "$TARGET" report "$survey" --finalize-tx "$hash" > "$dir/report.md"
-  ok "report verified on-chain ($hash): $dir/report.md"
   printf '  status: %s\n' "$(jq -r .status "$dir/$label.output.json")"
-  check_public "$dir/report.md" && ok "no fixture text, identifiers, source labels, counts or rejection details"
+  fetch_report "$dir" "$hash" "$dir/report.md"
 }
 
 cmd_refinalize() {
   local dir label hash
   need discovery near jq curl
+  check_cli
   dir=$(survey_dir "${1:?NAME}")
   [[ -s "$dir/finalize_tx" ]] || die "finalize first"
   label=$(next_finalize_label "$dir")
@@ -247,6 +289,7 @@ cmd_refinalize() {
   jq -e --slurpfile a "$dir/$first.output.json" '. == $a[0]' "$dir/$label.output.json" >/dev/null ||
     die "finalization retry $hash returned a different output"
   ok "retry $hash returned the identical stored report"
+  fetch_report "$dir" "$hash" "$dir/report-$hash.md"
   printf '  Its OutLayer job should be short: a stored report needs no inference.\n'
 }
 

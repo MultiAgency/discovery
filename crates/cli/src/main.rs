@@ -12,19 +12,18 @@ use std::path::PathBuf;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use clap::{Parser, Subcommand};
 use discovery_protocol::definition::{SurveyDefinition, Target};
-use discovery_protocol::envelope::seal;
+use discovery_protocol::envelope::{seal, MAX_RESPONSE};
 use discovery_protocol::response::Response;
 use discovery_protocol::SurveyStatus;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use verify::Release;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// The trusted release of the checkout this CLI was built from.
 const REGISTRY: &str = include_str!("../../../releases.json");
-const CONTRACT: &str = "outlayer.testnet";
 const API: &str = "https://testnet-api.outlayer.ai";
-const RPC: &str = "https://archival-rpc.testnet.near.org";
 
 #[derive(Parser)]
 #[command(name = "discovery", about = "Confidential surveys for agents")]
@@ -80,31 +79,23 @@ enum Preparation {
     Finalize { survey_id: String },
 }
 
-/// The one reviewed testnet release. Its lock is verified on-chain, per block.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Registry {
-    service: Option<Entry>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Entry {
-    project: String,
-    release: String,
-    organizer: String,
+    service: Option<Release>,
 }
 
 /// Without a registered service, live use is refused.
-fn configured_service(registry: &str) -> Result<Entry> {
-    let entry = serde_json::from_str::<Registry>(registry)?
+fn configured_service(registry: &str) -> Result<Release> {
+    let release = serde_json::from_str::<Registry>(registry)?
         .service
-        .ok_or("releases.json has no registered service")?;
-    if !is_hex(&entry.release, 32) || entry.release.to_lowercase() != entry.release {
+        .ok_or("this build registers no release (releases.json has no registered service)")?;
+    let hash = &release.wasm_hash;
+    if !is_hex(hash, 32) || hash.to_lowercase() != *hash {
         return Err("releases.json: release must be the lowercase hex sha256 of the wasm".into());
     }
-    match entry.project.split_once('/') {
-        Some((owner, _)) if owner == entry.organizer.as_str() => {
+    match release.project.split_once('/') {
+        Some((owner, _)) if owner == release.organizer.as_str() => {
             return Err(format!(
                 "releases.json: project owner {owner} must not be the organizer; \
                  the owner ends with no access keys"
@@ -114,10 +105,10 @@ fn configured_service(registry: &str) -> Result<Entry> {
         Some((owner, name)) if is_account(owner) && !name.is_empty() && !name.contains('/') => {}
         _ => return Err("releases.json: project must be <owner account>/<name>".into()),
     }
-    if !is_account(&entry.organizer) {
+    if !is_account(&release.organizer) {
         return Err("releases.json: organizer must be a NEAR account id".into());
     }
-    Ok(entry)
+    Ok(release)
 }
 
 fn is_hex(s: &str, bytes: usize) -> bool {
@@ -135,8 +126,21 @@ fn is_account(s: &str) -> bool {
         })
 }
 
-/// Input checks that need no network, run before any RPC or paid call.
-fn preflight(cli: &Cli) -> Result<()> {
+/// A command whose local inputs have all been read and validated.
+enum Checked<'a> {
+    /// Unsigned arguments to print: the survey id and the module input.
+    Prepare(String, Value),
+    Verify(&'a str, &'a str, &'a str),
+    Submit(&'a str, &'a str, &'a str, Response),
+    Report(&'a str, &'a str),
+}
+
+/// Every check that needs no network, reported together before any RPC or
+/// paid call. Error messages never echo the inputs.
+fn check<'a>(cli: &'a Cli, registry: &str) -> Result<(Release, Checked<'a>)> {
+    let mut errors = Vec::new();
+    let e = &mut errors;
+    let release = keep(e, configured_service(registry));
     if let Some(target) = &cli.target {
         let valid = target.rsplit_once('#').is_some_and(|(repo, number)| {
             repo.split('/').filter(|p| !p.is_empty()).count() == 2
@@ -144,180 +148,166 @@ fn preflight(cli: &Cli) -> Result<()> {
                 && number.parse::<u64>().is_ok_and(|n| n > 0)
         });
         if !valid {
-            return Err(format!("--target {target} must look like OWNER/REPO#NUMBER").into());
+            e.push("--target must look like OWNER/REPO#NUMBER".into());
         }
     }
-    let survey = |id: &str| -> Result<()> {
-        if is_hex(id, 32) {
-            Ok(())
-        } else {
-            Err(format!("{id} is not a survey id (64 hex characters)").into())
-        }
-    };
-    let tx = |hash: &str| -> Result<()> {
-        const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        if (32..=44).contains(&hash.len()) && hash.bytes().all(|b| BASE58.contains(&b)) {
-            Ok(())
-        } else {
-            Err(format!("{hash} is not a NEAR transaction hash").into())
-        }
-    };
-    let payment_key = || -> Result<()> {
-        match cli.payment_key.as_deref() {
-            Some(key) if key.splitn(3, ':').count() == 3 => Ok(()),
-            Some(_) => Err("DISCOVERY_PAYMENT_KEY must look like owner:nonce:secret".into()),
-            None => {
-                Err("DISCOVERY_PAYMENT_KEY is not set; it is in the survey announcement".into())
+    let checked = match &cli.command {
+        Command::Prepare {
+            operation: Preparation::Init { definition },
+        } => keep(e, read_definition(definition, cli.target.as_deref()))
+            .map(|(id, input)| Checked::Prepare(id, input)),
+        Command::Prepare {
+            operation: Preparation::Finalize { survey_id },
+        } => {
+            survey(e, survey_id);
+            if cli.target.is_some() {
+                e.push("verify the survey's target before preparing finalization".into());
             }
+            let input = json!({"operation": "finalize", "survey_id": survey_id});
+            Some(Checked::Prepare(survey_id.clone(), input))
         }
-    };
-    match &cli.command {
-        Command::Prepare { operation } => match operation {
-            Preparation::Init { .. } => Ok(()),
-            Preparation::Finalize { survey_id } => survey(survey_id),
-        },
         Command::Verify { survey_id, init_tx } => {
-            survey(survey_id)?;
-            tx(init_tx)?;
-            payment_key()
+            survey(e, survey_id);
+            tx(e, init_tx);
+            payment_key(e, cli).map(|key| Checked::Verify(survey_id, init_tx, key))
         }
         Command::Submit {
             survey_id,
             init_tx,
             answers,
         } => {
-            survey(survey_id)?;
-            tx(init_tx)?;
-            payment_key()?;
-            read_answers(answers).map(|_| ())
+            survey(e, survey_id);
+            tx(e, init_tx);
+            let key = payment_key(e, cli);
+            let response = keep(e, read_answers(answers));
+            key.zip(response)
+                .map(|(key, response)| Checked::Submit(survey_id, init_tx, key, response))
         }
         Command::Report {
             survey_id,
             finalize_tx,
         } => {
-            survey(survey_id)?;
-            tx(finalize_tx)
+            survey(e, survey_id);
+            tx(e, finalize_tx);
+            Some(Checked::Report(survey_id, finalize_tx))
+        }
+    };
+    match (release, checked) {
+        (Some(release), Some(checked)) if errors.is_empty() => Ok((release, checked)),
+        _ => Err(format!("local configuration errors:\n- {}", errors.join("\n- ")).into()),
+    }
+}
+
+fn keep<T>(errors: &mut Vec<String>, result: Result<T>) -> Option<T> {
+    result.map_err(|e| errors.push(e.to_string())).ok()
+}
+
+fn survey(errors: &mut Vec<String>, id: &str) {
+    if !is_hex(id, 32) {
+        errors.push("not a survey id (64 hex characters)".into());
+    }
+}
+
+fn tx(errors: &mut Vec<String>, hash: &str) {
+    const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if !(32..=44).contains(&hash.len()) || !hash.bytes().all(|b| BASE58.contains(&b)) {
+        errors.push("not a NEAR transaction hash".into());
+    }
+}
+
+fn payment_key<'a>(errors: &mut Vec<String>, cli: &'a Cli) -> Option<&'a str> {
+    match cli.payment_key.as_deref() {
+        Some(key) if key.splitn(3, ':').filter(|part| !part.is_empty()).count() == 3 => Some(key),
+        Some(_) => {
+            errors.push("DISCOVERY_PAYMENT_KEY must look like owner:nonce:secret".into());
+            None
+        }
+        None => {
+            errors
+                .push("DISCOVERY_PAYMENT_KEY is not set; it is in the survey announcement".into());
+            None
         }
     }
 }
 
+/// The survey id and creation input of a valid definition for `expected`.
+fn read_definition(path: &PathBuf, expected: Option<&str>) -> Result<(String, Value)> {
+    let bytes = fs::read(path).map_err(|_| "cannot read definition file")?;
+    let definition: SurveyDefinition =
+        serde_json::from_slice(&bytes).map_err(|_| "invalid survey definition JSON")?;
+    definition
+        .validate()
+        .map_err(|_| "invalid survey definition")?;
+    check_target(&definition.target, expected).map_err(|_| "definition does not match --target")?;
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    if u128::from(definition.deadline_ns) <= now_ns {
+        return Err("deadline_ns has passed; creation would fail on-chain".into());
+    }
+    let survey_id = hex::encode(definition.hash()?);
+    Ok((
+        survey_id,
+        json!({"operation": "init_survey", "definition": definition}),
+    ))
+}
+
 /// Parse answers and check their size; question ids need the verified definition.
 fn read_answers(path: &PathBuf) -> Result<Response> {
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let response: Response =
-        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = fs::read(path).map_err(|_| "cannot read answers file")?;
+    let response: Response = serde_json::from_slice(&bytes).map_err(|_| "invalid answers JSON")?;
     let size = serde_json::to_vec(&response)?.len();
-    if size > discovery_protocol::envelope::MAX_RESPONSE {
+    if size > MAX_RESPONSE {
         return Err(format!(
-            "{}: {size} bytes serialized, over the {} byte limit; shorten the answers",
-            path.display(),
-            discovery_protocol::envelope::MAX_RESPONSE
+            "{size} bytes serialized, over the {MAX_RESPONSE} byte limit; shorten the answers"
         )
         .into());
     }
     Ok(response)
 }
 
-struct Service {
-    entry: Entry,
-    rpc: verify::Rpc,
-    payment_key: Option<String>,
+/// Unsigned `request_execution` arguments for the pinned release.
+fn request(release: &Release, input: Value) -> Value {
+    let finalize = input["operation"] == "finalize";
+    let mut request = json!({
+        "source": {"Project": {"project_id": release.project, "version_key": release.wasm_hash}},
+        "input_data": input.to_string(),
+        "resource_limits": {"max_instructions": 50000000000u64,
+            "max_memory_mb": 256, "max_execution_seconds": if finalize { 180 } else { 60 }},
+        "response_format": "Json",
+    });
+    if finalize {
+        request["secrets_ref"] = json!({"profile": "nearai", "account_id": release.organizer});
+    }
+    request
 }
 
-impl Service {
-    fn new(cli: &Cli) -> Result<Self> {
-        Ok(Self {
-            entry: configured_service(REGISTRY)?,
-            rpc: verify::Rpc { url: RPC.into() },
-            payment_key: cli.payment_key.clone(),
-        })
+/// HTTPS call to the module, run as the payment key's owner.
+fn call(release: &Release, key: &str, input: Value) -> Result<Value> {
+    let reply: Value = ureq::post(&format!("{API}/call/{}", release.project))
+        .set("X-Payment-Key", key)
+        .send_json(json!({ "input": input, "version_key": release.wasm_hash }))
+        .map_err(|_| "service request failed; retry the identical answers if submitting")?
+        .into_json()
+        .map_err(|_| "invalid service response")?;
+    if reply["status"] != "completed" {
+        return Err("service call did not complete".into());
     }
+    if let Some(error) = reply["output"].get("error") {
+        return Err(safe_module_error(error).into());
+    }
+    Ok(reply["output"].clone())
+}
 
-    fn pinned(&self) -> verify::Release {
-        verify::Release {
-            contract: CONTRACT.into(),
-            project: self.entry.project.clone(),
-            wasm_hash: self.entry.release.clone(),
-            organizer: self.entry.organizer.clone(),
-        }
-    }
-
-    /// Unsigned `request_execution` arguments.
-    fn prepare(&self, operation: &Preparation, expected: Option<&str>) -> Result<Value> {
-        let (input, seconds) = match operation {
-            Preparation::Init { definition } => {
-                let path = definition;
-                let definition: SurveyDefinition = serde_json::from_slice(&fs::read(path)?)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                definition.validate()?;
-                check_target(&definition.target, expected)?;
-                let now_ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos();
-                if u128::from(definition.deadline_ns) <= now_ns {
-                    return Err("deadline_ns has passed; creation would fail on-chain".into());
-                }
-                eprintln!("survey_id: {}", hex::encode(definition.hash()?));
-                let input = json!({"operation": "init_survey", "definition": definition});
-                (input, 60)
-            }
-            Preparation::Finalize { survey_id } => {
-                if expected.is_some() {
-                    return Err("verify the survey's target before preparing finalization".into());
-                }
-                (
-                    json!({"operation": "finalize", "survey_id": survey_id}),
-                    180,
-                )
-            }
-        };
-        let Entry {
-            project,
-            release,
-            organizer,
-        } = &self.entry;
-        let mut request = json!({
-            "source": {"Project": {"project_id": project, "version_key": release}},
-            "input_data": input.to_string(),
-            "resource_limits": {"max_instructions": 50000000000u64,
-                "max_memory_mb": 256, "max_execution_seconds": seconds},
-            "response_format": "Json",
-        });
-        if input["operation"] == "finalize" {
-            request["secrets_ref"] = json!({"profile": "nearai", "account_id": organizer});
-        }
-        Ok(request)
-    }
-
-    /// HTTPS call to the module, run as the payment key's owner.
-    fn call(&self, input: Value) -> Result<Value> {
-        let key = self
-            .payment_key
-            .as_deref()
-            .ok_or("DISCOVERY_PAYMENT_KEY is not set")?;
-        let reply: Value = ureq::post(&format!("{}/call/{}", API, self.entry.project))
-            .set("X-Payment-Key", key)
-            .send_json(json!({ "input": input, "version_key": self.entry.release }))?
-            .into_json()?;
-        if reply["status"] != "completed" {
-            return Err(format!("call {}: {}", reply["status"], reply["error"]).into());
-        }
-        if let Some(e) = reply["output"].get("error") {
-            return Err(format!("module: {e}").into());
-        }
-        Ok(reply["output"].clone())
-    }
-
-    fn verified(
-        &self,
-        survey_id: &str,
-        init_tx: &str,
-        expected: Option<&str>,
-    ) -> Result<verify::Verified> {
-        let survey = verify::survey_key(&self.rpc, &self.pinned(), survey_id, init_tx)?;
-        check_target(&survey.definition.target, expected)?;
-        Ok(survey)
-    }
+fn verified(
+    release: &Release,
+    survey_id: &str,
+    init_tx: &str,
+    expected: Option<&str>,
+) -> Result<verify::Verified> {
+    let survey = verify::survey_key(release, survey_id, init_tx)?;
+    check_target(&survey.definition.target, expected)?;
+    Ok(survey)
 }
 
 fn check_target(actual: &Target, expected: Option<&str>) -> Result<()> {
@@ -331,11 +321,29 @@ fn check_target(actual: &Target, expected: Option<&str>) -> Result<()> {
 /// Encrypt only against the definition and key authenticated by the creation transaction.
 fn seal_answers(survey: &verify::Verified, response: Response) -> Result<String> {
     let hash = survey.definition.hash()?;
-    response.validate(&survey.definition)?;
+    response
+        .validate(&survey.definition)
+        .map_err(|_| "answers do not match the verified survey")?;
     let public: [u8; 32] = hex::decode(&survey.public_key)?
         .try_into()
         .map_err(|_| "bad survey key")?;
     Ok(B64.encode(seal(&public, &serde_json::to_vec(&response)?, &hash)?))
+}
+
+fn safe_module_error(error: &Value) -> &'static str {
+    match error.as_str() {
+        Some("survey is closed") => "survey is closed",
+        Some("survey is full") => "survey is full",
+        _ => "module refused the request",
+    }
+}
+
+fn require_accepted(output: &Value) -> Result<()> {
+    if output == &json!({"accepted": true}) {
+        Ok(())
+    } else {
+        Err("submission acceptance was not confirmed; retry the identical answers".into())
+    }
 }
 
 fn print(value: &impl serde::Serialize) -> Result<()> {
@@ -344,7 +352,7 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 
 fn main() -> std::process::ExitCode {
-    match run(Cli::parse()) {
+    match run(&Cli::parse()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("discovery: {error}");
@@ -353,23 +361,27 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
-    preflight(&cli)?;
-    let s = Service::new(&cli)?;
+fn run(cli: &Cli) -> Result<()> {
+    let (release, checked) = check(cli, REGISTRY)?;
     let expected = cli.target.as_deref();
-    match &cli.command {
-        Command::Prepare { operation } => print(&s.prepare(operation, expected)?)?,
-        Command::Verify { survey_id, init_tx } => {
-            let survey = s.verified(survey_id, init_tx, expected)?;
-            let state: SurveyStatus = serde_json::from_value(
-                s.call(json!({ "operation": "status", "survey_id": survey_id }))?,
-            )?;
+    match checked {
+        Checked::Prepare(survey_id, input) => {
+            eprintln!("survey_id: {survey_id}");
+            print(&request(&release, input))?;
+        }
+        Checked::Verify(survey_id, init_tx, key) => {
+            let survey = verified(&release, survey_id, init_tx, expected)?;
+            let state: SurveyStatus = serde_json::from_value(call(
+                &release,
+                key,
+                json!({ "operation": "status", "survey_id": survey_id }),
+            )?)?;
             if state.definition != survey.definition {
                 return Err("OutLayer reports a different definition than the chain".into());
             }
             print(&json!({
                 "survey_id": survey_id,
-                "release": s.entry.release,
+                "release": release.wasm_hash,
                 "definition": survey.definition,
                 "accepting_responses": state.key_present && !state.closed,
                 "closed": state.closed,
@@ -377,28 +389,25 @@ fn run(cli: Cli) -> Result<()> {
                 "report_released": state.report_released,
             }))?;
         }
-        Command::Submit {
-            survey_id,
-            init_tx,
-            answers,
-        } => {
-            let response = read_answers(answers)?;
-            let envelope = seal_answers(&s.verified(survey_id, init_tx, expected)?, response)?;
-            s.call(json!({ "operation": "submit", "survey_id": survey_id, "envelope": envelope }))?;
+        Checked::Submit(survey_id, init_tx, key, response) => {
+            let envelope =
+                seal_answers(&verified(&release, survey_id, init_tx, expected)?, response)?;
+            require_accepted(&call(
+                &release,
+                key,
+                json!({ "operation": "submit", "survey_id": survey_id, "envelope": envelope }),
+            )?)?;
             println!("Submitted. Responses are immutable; identical retries are counted once.");
         }
-        Command::Report {
-            survey_id,
-            finalize_tx,
-        } => {
-            let report = verify::report(&s.rpc, &s.pinned(), survey_id, finalize_tx)?;
+        Checked::Report(survey_id, finalize_tx) => {
+            let report = verify::report(&release, survey_id, finalize_tx)?;
             check_target(&report.target, expected)?;
             eprintln!("Verified against the release's on-chain finalize output.");
             print!(
                 "{}\n---\nReleased by survey `{survey_id}` (finalize tx `{finalize_tx}`, release `{}`). \
                  Verify with this CLI: `discovery report {survey_id} --finalize-tx {finalize_tx}`.\n",
                 report.markdown(),
-                s.entry.release,
+                release.wasm_hash,
             );
         }
     }
@@ -411,14 +420,6 @@ mod tests {
 
     const RELEASE: &str = "5f1e3c2a9b8d7e6f5f1e3c2a9b8d7e6f5f1e3c2a9b8d7e6f5f1e3c2a9b8d7e6f";
 
-    fn service() -> Service {
-        Service {
-            entry: configured_service(&registry(RELEASE)).unwrap(),
-            rpc: verify::Rpc { url: String::new() },
-            payment_key: None,
-        }
-    }
-
     fn registry(release: &str) -> String {
         json!({"service": {"project": "owner.testnet/discovery", "release": release,
             "organizer": "organizer.testnet"}})
@@ -429,14 +430,20 @@ mod tests {
     #[test]
     fn the_compiled_registry_is_absent_or_valid() {
         if let Err(error) = configured_service(REGISTRY) {
-            assert_eq!(error.to_string(), "releases.json has no registered service");
+            assert_eq!(
+                error.to_string(),
+                "this build registers no release (releases.json has no registered service)"
+            );
         }
     }
 
     #[test]
     fn registry_entries_are_validated() {
         let error = configured_service(r#"{"service": null}"#).err().unwrap();
-        assert_eq!(error.to_string(), "releases.json has no registered service");
+        assert_eq!(
+            error.to_string(),
+            "this build registers no release (releases.json has no registered service)"
+        );
         for registry in [
             r#"{"service": null, "historical": []}"#,
             r#"{"service": null, "unexpected": true}"#,
@@ -445,7 +452,7 @@ mod tests {
             assert!(error.contains("unknown field"), "{error}");
         }
         assert_eq!(
-            configured_service(&registry(RELEASE)).unwrap().release,
+            configured_service(&registry(RELEASE)).unwrap().wasm_hash,
             RELEASE
         );
         let mut extra: Value = serde_json::from_str(&registry(RELEASE)).unwrap();
@@ -470,6 +477,67 @@ mod tests {
     }
 
     #[test]
+    fn submission_requires_exact_acceptance_without_echoing_output() {
+        assert!(require_accepted(&json!({"accepted": true})).is_ok());
+        for output in [
+            Value::Null,
+            json!({}),
+            json!({"accepted": false}),
+            json!({"accepted": "true"}),
+            json!({"accepted": true, "private": "SECRET"}),
+            json!({"error": "SECRET"}),
+        ] {
+            let error = require_accepted(&output).unwrap_err().to_string();
+            assert!(!error.contains("SECRET"));
+            assert!(error.contains("not confirmed"));
+            assert_eq!(safe_module_error(&output), "module refused the request");
+        }
+    }
+
+    #[test]
+    fn module_errors_only_reveal_fixed_public_states() {
+        for state in ["survey is closed", "survey is full"] {
+            assert_eq!(safe_module_error(&json!(state)), state);
+        }
+        assert_eq!(
+            safe_module_error(&json!("SECRET private answer")),
+            "module refused the request"
+        );
+    }
+
+    #[test]
+    fn preflight_collects_all_local_errors_without_echoing_inputs() {
+        let mut cli = Cli::try_parse_from([
+            "discovery",
+            "--target",
+            "SECRET",
+            "submit",
+            "SECRET",
+            "--init-tx",
+            "SECRET",
+            "/missing/SECRET",
+        ])
+        .unwrap();
+        cli.payment_key = None;
+        let error = check(&cli, r#"{"service": null}"#)
+            .err()
+            .unwrap()
+            .to_string();
+        for expected in [
+            "this build registers no release",
+            "OWNER/REPO#NUMBER",
+            "not a survey id",
+            "not a NEAR transaction hash",
+            "DISCOVERY_PAYMENT_KEY is not set",
+            "cannot read answers file",
+        ] {
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(!error.contains("SECRET"));
+        assert!(error.find("registers no release") < error.find("DISCOVERY_PAYMENT_KEY"));
+    }
+
+    #[test]
     fn local_input_errors_come_before_any_network_call() {
         let answers =
             std::env::temp_dir().join(format!("discovery-answers-{}.json", std::process::id()));
@@ -478,7 +546,9 @@ mod tests {
         let run = |args: &[&str], key: Option<&str>| {
             let mut cli = Cli::try_parse_from(args).unwrap();
             cli.payment_key = key.map(String::from);
-            preflight(&cli).map_err(|e| e.to_string())
+            check(&cli, &registry(RELEASE))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         };
         fs::write(
             &answers,
@@ -583,19 +653,25 @@ mod tests {
 
     #[test]
     fn preparation_validates_inputs_and_uses_the_registered_release() {
-        let s = service();
         let file =
             std::env::temp_dir().join(format!("discovery-prepare-{}.json", std::process::id()));
+        let path = file.to_str().unwrap();
+        let prepare = |args: &[&str]| -> Result<Value> {
+            let cli = Cli::try_parse_from(args).unwrap();
+            match check(&cli, &registry(RELEASE))? {
+                (release, Checked::Prepare(_, input)) => Ok(request(&release, input)),
+                _ => unreachable!(),
+            }
+        };
         let definition = json!({"version": discovery_protocol::definition::DEFINITION_VERSION,
             "title": "Onboarding", "target": {"repo": "another/repo", "number": 42},
             "deadline_ns": 1900000000000000000u64,
             "questions": [{"id": "workflow", "prompt": "What did you try?"}],
             "rules": {"no_direct_quotes": false, "withheld_terms": []}});
         fs::write(&file, definition.to_string()).unwrap();
-        let init = Preparation::Init {
-            definition: file.clone(),
-        };
-        let creation = s.prepare(&init, Some("another/repo#42")).unwrap();
+        let init =
+            |target: &str| prepare(&["discovery", "--target", target, "prepare", "init", path]);
+        let creation = init("another/repo#42").unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(creation["input_data"].as_str().unwrap()).unwrap(),
             json!({"operation": "init_survey", "definition": definition})
@@ -604,35 +680,44 @@ mod tests {
             creation["source"]["Project"],
             json!({"project_id": "owner.testnet/discovery", "version_key": RELEASE})
         );
+        assert_eq!(creation["resource_limits"]["max_execution_seconds"], 60);
         assert!(creation.get("secrets_ref").is_none());
-        assert!(s.prepare(&init, Some("wrong/repo#42")).is_err());
+        assert!(init("wrong/repo#42").is_err());
         let mut past = definition.clone();
         past["deadline_ns"] = json!(1_000_000_000_000_000_000u64);
         fs::write(&file, past.to_string()).unwrap();
-        assert!(s
-            .prepare(&init, None)
+        assert!(prepare(&["discovery", "prepare", "init", path])
             .unwrap_err()
             .to_string()
             .contains("has passed"));
         fs::write(&file, "{}").unwrap();
-        assert!(s.prepare(&init, None).is_err());
+        assert!(prepare(&["discovery", "prepare", "init", path]).is_err());
         fs::remove_file(file).unwrap();
 
         let survey_id = "c".repeat(64);
-        let finalize = Preparation::Finalize {
-            survey_id: survey_id.clone(),
-        };
-        let finalization = s.prepare(&finalize, None).unwrap();
+        let finalization = prepare(&["discovery", "prepare", "finalize", &survey_id]).unwrap();
         assert_eq!(finalization["source"], creation["source"]);
         assert_eq!(
             serde_json::from_str::<Value>(finalization["input_data"].as_str().unwrap()).unwrap(),
             json!({"operation": "finalize", "survey_id": survey_id})
         );
         assert_eq!(
+            finalization["resource_limits"]["max_execution_seconds"],
+            180
+        );
+        assert_eq!(
             finalization["secrets_ref"],
             json!({"profile": "nearai", "account_id": "organizer.testnet"})
         );
-        assert!(s.prepare(&finalize, Some("another/repo#42")).is_err());
+        assert!(prepare(&[
+            "discovery",
+            "--target",
+            "another/repo#42",
+            "prepare",
+            "finalize",
+            &survey_id
+        ])
+        .is_err());
     }
 
     #[test]

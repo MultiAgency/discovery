@@ -6,16 +6,21 @@
 //! owner was initialized, without access keys or contract code: otherwise
 //! another version could have read the key before the project was locked.
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::Result;
-pub use rpc::Rpc;
 use rpc::{events, success_value};
 
-/// A registered release: the audited build and the organizer it runs as.
+pub const CONTRACT: &str = "outlayer.testnet";
+
+/// The registered release (`releases.json`): the audited build and the
+/// organizer it runs as.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Release {
-    pub contract: String,
     pub project: String,
+    #[serde(rename = "release")]
     pub wasm_hash: String,
     pub organizer: String,
 }
@@ -25,13 +30,8 @@ pub struct Verified {
     pub definition: discovery_protocol::definition::SurveyDefinition,
 }
 
-pub fn survey_key(
-    rpc: &Rpc,
-    release: &Release,
-    survey_id: &str,
-    init_tx: &str,
-) -> Result<Verified> {
-    let outcome = rpc.tx(init_tx, &release.organizer)?;
+pub fn survey_key(release: &Release, survey_id: &str, init_tx: &str) -> Result<Verified> {
+    let outcome = rpc::tx(init_tx, &release.organizer)?;
     let (input, output, block) = execution(&outcome, release)?;
     if input["operation"] != "init_survey" {
         return Err("execution was not init_survey".into());
@@ -49,7 +49,7 @@ pub fn survey_key(
         .ok_or("init output has no public key")?
         .to_string();
 
-    require_locked(rpc, release, &block)?;
+    require_locked(release, &block)?;
     Ok(Verified {
         public_key,
         definition,
@@ -59,9 +59,7 @@ pub fn survey_key(
 /// Check contract execution provenance before trusting the returned bytes.
 pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Value, String)> {
     let tx = &outcome["transaction"];
-    if tx["signer_id"] != release.organizer.as_str()
-        || tx["receiver_id"] != release.contract.as_str()
-    {
+    if tx["signer_id"] != release.organizer.as_str() || tx["receiver_id"] != CONTRACT {
         return Err("transaction is not from the organizer to OutLayer".into());
     }
     let action = &tx["actions"][0]["FunctionCall"];
@@ -71,7 +69,7 @@ pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Va
         return Err("transaction is not a single request_execution".into());
     }
 
-    let requested = events(outcome, &release.contract, "execution_requested");
+    let requested = events(outcome, CONTRACT, "execution_requested");
     let [(event, block)] = requested.as_slice() else {
         return Err("transaction has no single execution_requested event".into());
     };
@@ -96,7 +94,7 @@ pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Va
     }
     let input: Value =
         serde_json::from_str(request["input_data"].as_str().ok_or("no input_data")?)?;
-    let completed = events(outcome, &release.contract, "execution_completed");
+    let completed = events(outcome, CONTRACT, "execution_completed");
     if completed.len() != 1 || completed[0].0["success"] != true {
         return Err("execution did not complete successfully exactly once".into());
     }
@@ -106,15 +104,14 @@ pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Va
 /// Fetch the report from the finalized chain transaction, never the HTTPS API.
 /// OutLayer's contract authenticates the worker output for the pinned build.
 pub fn report(
-    rpc: &Rpc,
     release: &Release,
     survey_id: &str,
     finalize_tx: &str,
 ) -> Result<discovery_protocol::report::Report> {
-    let outcome = rpc.tx(finalize_tx, &release.organizer)?;
+    let outcome = rpc::tx(finalize_tx, &release.organizer)?;
     let (input, output, block) = execution(&outcome, release)?;
     let report = report_output(&input, output, survey_id)?;
-    require_locked(rpc, release, &block)?;
+    require_locked(release, &block)?;
     Ok(report)
 }
 
@@ -141,19 +138,17 @@ fn report_output(
 
 /// At the execution block, the release must have been the project's only
 /// version, owned by an initialized account without access keys or code.
-fn require_locked(rpc: &Rpc, release: &Release, block: &str) -> Result<()> {
+fn require_locked(release: &Release, block: &str) -> Result<()> {
     let mut warnings = Vec::new();
-    let project = rpc.view(
-        &release.contract,
+    let project = rpc::view(
+        block,
         "get_project",
         json!({ "project_id": release.project }),
-        Some(block),
     )?;
-    let versions = rpc.view(
-        &release.contract,
+    let versions = rpc::view(
+        block,
         "list_versions",
         json!({ "project_id": release.project, "limit": 100 }),
-        Some(block),
     )?;
     let hashes: Vec<&str> = versions
         .as_array()
@@ -171,8 +166,11 @@ fn require_locked(rpc: &Rpc, release: &Release, block: &str) -> Result<()> {
         ));
     }
     let owner = project["owner"].as_str().ok_or("project has no owner")?;
-    let keys = rpc.access_key_count(owner, Some(block))?;
-    let account = rpc.account(owner, Some(block))?;
+    let keys = rpc::query(block, "view_access_key_list", owner)?["keys"]
+        .as_array()
+        .ok_or("access key query has no key list")?
+        .len();
+    let account = rpc::query(block, "view_account", owner)?;
     if !owner_is_locked(&account, keys) {
         warnings.push(format!("project owner {owner} was not an initialized account without access keys or contract code at execution"));
     }
@@ -219,7 +217,6 @@ mod tests {
 
     fn release() -> Release {
         Release {
-            contract: "outlayer.testnet".into(),
             project: "owner/discovery".into(),
             wasm_hash: "audited".into(),
             organizer: "organizer.testnet".into(),
@@ -337,83 +334,49 @@ mod rpc {
 
     use crate::Result;
 
-    pub struct Rpc {
-        pub url: String,
+    const RPC: &str = "https://archival-rpc.testnet.near.org";
+
+    fn call(method: &str, params: Value) -> Result<Value> {
+        let reply: Value = ureq::post(RPC)
+            .timeout(std::time::Duration::from_secs(30))
+            .send_json(
+                json!({ "jsonrpc": "2.0", "id": "discovery", "method": method, "params": params }),
+            )?
+            .into_json()?;
+        if let Some(e) = reply.get("error") {
+            return Err(format!("rpc {method}: {e}").into());
+        }
+        if let Some(e) = reply["result"].get("error") {
+            return Err(format!("rpc {method}: {e}").into());
+        }
+        Ok(reply["result"].clone())
     }
 
-    impl Rpc {
-        fn call(&self, method: &str, params: Value) -> Result<Value> {
-            let reply: Value = ureq::post(&self.url)
-                .timeout(std::time::Duration::from_secs(30))
-                .send_json(
-                    json!({ "jsonrpc": "2.0", "id": "discovery", "method": method, "params": params }),
-                )?
-                .into_json()?;
-            if let Some(e) = reply.get("error") {
-                return Err(format!("rpc {method}: {e}").into());
-            }
-            if let Some(e) = reply["result"].get("error") {
-                return Err(format!("rpc {method}: {e}").into());
-            }
-            Ok(reply["result"].clone())
-        }
-
-        fn at(block_hash: Option<&str>) -> Value {
-            match block_hash {
-                Some(h) => json!({ "block_id": h }),
-                None => json!({ "finality": "final" }),
-            }
-        }
-
-        /// Call a view method; `block_hash` reads historical state (archival RPC).
-        pub fn view(
-            &self,
-            contract: &str,
-            method: &str,
-            args: Value,
-            block_hash: Option<&str>,
-        ) -> Result<Value> {
-            let mut params = json!({
-                "request_type": "call_function",
-                "account_id": contract,
-                "method_name": method,
-                "args_base64": B64.encode(serde_json::to_vec(&args)?),
-            });
-            merge(&mut params, Self::at(block_hash));
-            let result = self.call("query", params)?;
-            let bytes: Vec<u8> = serde_json::from_value(result["result"].clone())?;
-            Ok(serde_json::from_slice(&bytes)?)
-        }
-
-        pub fn access_key_count(&self, account: &str, block_hash: Option<&str>) -> Result<usize> {
-            let mut params =
-                json!({ "request_type": "view_access_key_list", "account_id": account });
-            merge(&mut params, Self::at(block_hash));
-            let result = self.call("query", params)?;
-            Ok(result["keys"]
-                .as_array()
-                .ok_or("access key query has no key list")?
-                .len())
-        }
-
-        pub fn account(&self, account: &str, block_hash: Option<&str>) -> Result<Value> {
-            let mut params = json!({ "request_type": "view_account", "account_id": account });
-            merge(&mut params, Self::at(block_hash));
-            self.call("query", params)
-        }
-
-        pub fn tx(&self, hash: &str, sender: &str) -> Result<Value> {
-            self.call(
-                "tx",
-                json!({ "tx_hash": hash, "sender_account_id": sender, "wait_until": "FINAL" }),
-            )
-        }
+    /// Account state at a historical block (archival RPC).
+    pub fn query(block: &str, request_type: &str, account: &str) -> Result<Value> {
+        call(
+            "query",
+            json!({ "request_type": request_type, "account_id": account, "block_id": block }),
+        )
     }
 
-    fn merge(target: &mut Value, extra: Value) {
-        if let (Some(t), Some(e)) = (target.as_object_mut(), extra.as_object()) {
-            t.extend(e.clone());
-        }
+    /// An OutLayer contract view at a historical block.
+    pub fn view(block: &str, method: &str, args: Value) -> Result<Value> {
+        let result = call(
+            "query",
+            json!({ "request_type": "call_function", "account_id": super::CONTRACT,
+                "method_name": method, "args_base64": B64.encode(serde_json::to_vec(&args)?),
+                "block_id": block }),
+        )?;
+        let bytes: Vec<u8> = serde_json::from_value(result["result"].clone())?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub fn tx(hash: &str, sender: &str) -> Result<Value> {
+        call(
+            "tx",
+            json!({ "tx_hash": hash, "sender_account_id": sender, "wait_until": "FINAL" }),
+        )
     }
 
     /// Decode the final `SuccessValue` of a transaction outcome as JSON.
