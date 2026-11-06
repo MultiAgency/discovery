@@ -1,4 +1,4 @@
-//! Encryption to the survey key, with padding to size buckets.
+//! Encryption to the survey key, with padding to one fixed size.
 //!
 //! X25519 ECDH with a fresh ephemeral key, HKDF-SHA256, XChaCha20-Poly1305:
 //! the same construction NEAR AI uses for end-to-end encryption.
@@ -7,9 +7,10 @@
 //! The associated data is the definition hash, so an envelope can't be replayed
 //! into another survey.
 //!
-//! Plaintext is padded to the next bucket before sealing. OutLayer's public job
-//! log shows each run's instruction count, which would otherwise reveal response
-//! length (D7).
+//! Plaintext is padded to [`PADDED`] before sealing, so every envelope has the
+//! same length. OutLayer's public job log shows each run's instruction count,
+//! which would otherwise reveal response length. The size also keeps each
+//! response short enough for its human to review and approve.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -23,8 +24,10 @@ pub const FORMAT: u8 = 0x01;
 const INFO: &[u8] = b"discovery:v1:envelope";
 const HEADER: usize = 1 + 32 + 24;
 
-/// Padded plaintext sizes. Anything larger is refused.
-pub const BUCKETS: [usize; 4] = [4 * 1024, 16 * 1024, 64 * 1024, 256 * 1024];
+/// Padded plaintext size of every envelope.
+pub const PADDED: usize = 4 * 1024;
+/// Largest response, in serialized bytes; anything larger is refused.
+pub const MAX_RESPONSE: usize = PADDED - 4;
 
 /// A survey's X25519 keypair. The secret exists only inside the module.
 pub struct SurveyKey(StaticSecret);
@@ -108,26 +111,24 @@ fn cipher(
     Ok(XChaCha20Poly1305::new(&key.into()))
 }
 
-/// `u32 length (LE) || data || zeros` up to the smallest bucket that fits.
+/// `u32 length (LE) || data || zeros` up to [`PADDED`].
 pub fn pad(data: &[u8]) -> Result<Vec<u8>> {
-    let needed = 4 + data.len();
-    let Some(&bucket) = BUCKETS.iter().find(|&&b| b >= needed) else {
+    if data.len() > MAX_RESPONSE {
         return err(format!(
-            "response too large: {} bytes (max {})",
-            data.len(),
-            BUCKETS[3] - 4
+            "response too large: {} bytes (max {MAX_RESPONSE}); shorten the answers",
+            data.len()
         ));
-    };
-    let mut out = Vec::with_capacity(bucket);
+    }
+    let mut out = Vec::with_capacity(PADDED);
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
     out.extend_from_slice(data);
-    out.resize(bucket, 0);
+    out.resize(PADDED, 0);
     Ok(out)
 }
 
 pub fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
-    if !BUCKETS.contains(&padded.len()) {
-        return err("padded length is not a bucket");
+    if padded.len() != PADDED {
+        return err("padded length is wrong");
     }
     let len = u32::from_le_bytes(padded[..4].try_into().expect("4 bytes")) as usize;
     if 4 + len > padded.len() || padded[4 + len..].iter().any(|b| *b != 0) {
@@ -143,13 +144,6 @@ mod tests {
     const H: Hash = [7u8; 32];
 
     #[test]
-    fn round_trip() {
-        let key = SurveyKey::generate().unwrap();
-        let env = seal(&key.public(), b"hello", &H).unwrap();
-        assert_eq!(key.open(&env, &H).unwrap(), b"hello");
-    }
-
-    #[test]
     fn bound_to_definition() {
         let key = SurveyKey::generate().unwrap();
         let env = seal(&key.public(), b"hello", &H).unwrap();
@@ -161,6 +155,7 @@ mod tests {
         let key = SurveyKey::generate().unwrap();
         let other = SurveyKey::generate().unwrap();
         let mut env = seal(&key.public(), b"hello", &H).unwrap();
+        assert_eq!(key.open(&env, &H).unwrap(), b"hello");
         assert!(other.open(&env, &H).is_err());
         let last = env.len() - 1;
         env[last] ^= 1;
@@ -168,17 +163,17 @@ mod tests {
     }
 
     #[test]
-    fn length_hidden_within_bucket() {
+    fn every_envelope_has_the_same_length() {
         let key = SurveyKey::generate().unwrap();
         let a = seal(&key.public(), b"a", &H).unwrap();
-        let b = seal(&key.public(), &[b'x'; 3000], &H).unwrap();
+        let b = seal(&key.public(), &[b'x'; MAX_RESPONSE], &H).unwrap();
         assert_eq!(a.len(), b.len());
     }
 
     #[test]
     fn padding_limits() {
-        assert!(pad(&vec![0u8; BUCKETS[3] - 4]).is_ok());
-        assert!(pad(&vec![0u8; BUCKETS[3] - 3]).is_err());
+        assert!(pad(&vec![0u8; MAX_RESPONSE]).is_ok());
+        assert!(pad(&vec![0u8; MAX_RESPONSE + 1]).is_err());
         let mut p = pad(b"abc").unwrap();
         p[10] = 1;
         assert!(unpad(&p).is_err());

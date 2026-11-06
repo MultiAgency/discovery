@@ -55,7 +55,7 @@ Telemetry collection and usage verification are outside scope. Future adapters c
 
 ## 6. Privacy and NEAR architecture
 
-NEAR AI is the selected provider for confidential model processing. OutLayer is a candidate for TEE-based application processing and encrypted storage; the complete integration remains to be established.
+OutLayer runs the service and its encrypted storage in TEE-backed workers. NEAR AI provides confidential model inference. The [README](../README.md#service-policy) states exactly what each is trusted for.
 
 The intended boundary is that survey organizers receive published findings without access to individual answers or underlying personal context. Transfer, storage, model calls and application logging must preserve that boundary. Intermediate data should be discarded under the agreed retention policy.
 
@@ -67,6 +67,4 @@ Reports should preserve useful themes, disagreement, uncertainty and implication
 
 The demo should complete the full request-to-report cycle and show that the report improves understanding of an existing issue—for example, by changing an acceptance criterion or exposing an incorrect assumption. It should also demonstrate that identifying material is withheld under the publication rules.
 
-The next requirements pass will settle authorization, the precise privacy promise, retention, response-abuse handling, synthesis checks and the outcome when a report cannot safely be released.
-
-Supporting technical research: ‣.
+The [README](../README.md#service-policy) sets the MVP's authorization, privacy promise, retention, abuse handling, synthesis checks and withholding outcome.

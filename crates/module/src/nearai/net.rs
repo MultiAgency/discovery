@@ -1,4 +1,4 @@
-// Derived from MultiAgency/private-ai@dd469a5 app/src/net.rs. Local changes: VENDORED.md.
+// Derived from MultiAgency/private-ai@dd469a5 app/src/net.rs. Local changes: module documentation in mod.rs.
 //! The network inside the enclave, over wasi-http: NEAR AI Cloud (port of
 //! `core/nearai.mjs` and `core/turn.mjs`), Intel collateral from Phala's PCCS
 //! (what @phala/dcap-qvl fetches), and NVIDIA's attestation service. Requests
@@ -17,15 +17,14 @@ use wasip2::http::outgoing_handler;
 use wasip2::http::types::{Fields, Method, OutgoingBody, OutgoingRequest, Scheme};
 use wasip2::io::streams::StreamError;
 
-use crate::attest::{self, Attestation, Nvidia, Options, Verified, NRAS};
-use crate::e2ee::Session;
-use crate::receipt::Evidence;
-use crate::sign::{check_signature, sha256, signed_text};
+use crate::nearai::attest::{self, Attestation, Nvidia, Options, Verified, NRAS};
+use crate::nearai::e2ee::Session;
+use crate::nearai::sign::{check_signature, sha256, signed_text};
 
-pub struct Response {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+struct Response {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
 }
 
 impl Response {
@@ -38,7 +37,7 @@ impl Response {
 }
 
 /// One HTTPS request; the body is read to the end as it streams.
-pub fn request(
+fn request(
     method: Method,
     url: &str,
     headers: &[(&str, String)],
@@ -117,7 +116,7 @@ fn get(url: &str) -> Result<Response> {
     Ok(response)
 }
 
-pub fn now_seconds() -> u64 {
+fn now_seconds() -> u64 {
     wasip2::clocks::wall_clock::now().seconds
 }
 
@@ -169,7 +168,7 @@ fn issuer_chain(response: &Response, names: &[&str]) -> Result<String> {
 
 /// The collateral for a quote whose certification data embeds its PCK chain
 /// (as NEAR AI's TDX quotes do), fetched as @phala/dcap-qvl fetches it.
-pub fn collateral(quote: &[u8]) -> Result<QuoteCollateralV3> {
+fn collateral(quote: &[u8]) -> Result<QuoteCollateralV3> {
     let parsed = Quote::parse(quote).context("Failed to parse quote")?;
     if parsed.inner_cert_type() != 5 {
         bail!(
@@ -223,13 +222,13 @@ pub fn collateral(quote: &[u8]) -> Result<QuoteCollateralV3> {
 }
 
 /// Verifies a quote against the current collateral.
-pub fn verify_quote_live(quote: &[u8]) -> Result<Verified> {
+fn verify_quote_live(quote: &[u8]) -> Result<Verified> {
     attest::verify_quote(quote, &collateral(quote)?, now_seconds())
 }
 
 // ---- NVIDIA ----
 
-pub struct LiveNvidia;
+struct LiveNvidia;
 
 impl Nvidia for LiveNvidia {
     /// NVIDIA's signed verdict on a model's GPU evidence: a JWT from its attestation service.
@@ -267,41 +266,19 @@ impl Nvidia for LiveNvidia {
 
 const BASE: &str = "https://cloud-api.near.ai/v1";
 
-const CHAT_ATTEMPTS: u32 = 2;
-
-/// A failure worth one more try: the connection, or a gateway in front of the model.
-#[derive(Debug)]
-struct Retryable(String);
-
-impl std::fmt::Display for Retryable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Retryable {}
-
 pub struct NearAi {
     api_key: String,
 }
 
 /// A chat completion's exact bytes both ways, and its parsed events.
-pub struct Chat {
-    pub request: Vec<u8>,
-    pub response: Vec<u8>,
-    pub events: Vec<Value>,
-}
-
-/// A signed turn: the decrypted reply, and what the receipt records.
-pub struct Turn {
-    pub reply: Value,
-    pub finish_reason: Option<String>,
-    pub usage: Option<Value>,
-    pub record: Value,
+struct Chat {
+    request: Vec<u8>,
+    response: Vec<u8>,
+    events: Vec<Value>,
 }
 
 /// The server-sent events of a streamed reply, without the closing [DONE].
-pub fn parse_events(raw: &[u8]) -> Result<Vec<Value>> {
+fn parse_events(raw: &[u8]) -> Result<Vec<Value>> {
     String::from_utf8_lossy(raw)
         .split('\n')
         .filter_map(|line| line.strip_prefix("data: "))
@@ -330,35 +307,14 @@ impl NearAi {
         ];
         headers.extend(extra.iter().cloned());
         let name = path.split('?').next().unwrap_or(path);
-        let response = request(method, &format!("{BASE}{path}"), &headers, body)
-            .map_err(|e| anyhow::Error::new(Retryable(format!("NEAR AI {name}: {e}"))))?;
-        if [502, 503, 504].contains(&response.status) {
-            return Err(anyhow::Error::new(Retryable(format!(
-                "NEAR AI {name}: {}",
-                response.status
-            ))));
-        }
+        let response = request(method, &format!("{BASE}{path}"), &headers, body)?;
         if !(200..300).contains(&response.status) {
-            // Error text names the status and the API's own message; request
-            // bodies are ciphertext, so an echo of them reveals nothing.
-            let message = serde_json::from_slice::<Value>(&response.body)
-                .ok()
-                .and_then(|v| {
-                    v["error"]["message"]
-                        .as_str()
-                        .map(|m| m.chars().take(200).collect::<String>())
-                });
-            bail!(
-                "NEAR AI {}: {}{}",
-                path.split('?').next().unwrap_or(path),
-                response.status,
-                message.map(|m| format!(" {m}")).unwrap_or_default()
-            );
+            bail!("NEAR AI {name}: {}", response.status);
         }
         Ok(response.body)
     }
 
-    pub fn attestation_report(&self, model: &str, nonce: &str) -> Result<Value> {
+    fn attestation_report(&self, model: &str, nonce: &str) -> Result<Value> {
         let path = format!("/attestation/report?model={}&provider=near&signing_algo=ed25519&include_tls_fingerprint=false&nonce={nonce}", model.replace('/', "%2F"));
         Ok(serde_json::from_slice(&self.send(
             Method::Get,
@@ -369,26 +325,13 @@ impl NearAi {
     }
 
     /// A streamed chat completion: the exact bytes both ways, and the parsed events.
-    pub fn chat(&self, e2ee_headers: &[(&'static str, String)], mut body: Value) -> Result<Chat> {
+    fn chat(&self, e2ee_headers: &[(&'static str, String)], mut body: Value) -> Result<Chat> {
         body["stream"] = json!(true);
         let request = serde_json::to_vec(&body)?;
         let mut headers = e2ee_headers.to_vec();
         headers.push(("content-type", "application/json".into()));
         headers.push(("accept-encoding", "identity".into()));
-        // A dropped connection or a gateway error is retried once: nothing from
-        // a reply is used until its signature checks out, so a retry costs
-        // tokens, never correctness (as core/nearai.mjs does).
-        let mut attempt = 1;
-        let response = loop {
-            match self.send(Method::Post, "/chat/completions", &headers, Some(&request)) {
-                Ok(response) => break response,
-                Err(e) if attempt < CHAT_ATTEMPTS && e.downcast_ref::<Retryable>().is_some() => {
-                    attempt += 1;
-                    sleep_ms(3000);
-                }
-                Err(e) => return Err(e),
-            }
-        };
+        let response = self.send(Method::Post, "/chat/completions", &headers, Some(&request))?;
         let events = parse_events(&response)?;
         Ok(Chat {
             request,
@@ -398,7 +341,7 @@ impl NearAi {
     }
 
     /// A signature can lag its response by a moment; retry briefly, then give up.
-    pub fn signature(&self, id: &str, model: &str) -> Result<Value> {
+    fn signature(&self, id: &str, model: &str) -> Result<Value> {
         let path = format!(
             "/signature/{id}?signing_algo=ed25519&model={}",
             model.replace('/', "%2F")
@@ -420,48 +363,18 @@ impl NearAi {
         Err(last)
     }
 
-    /// Fetches a fresh report for the model and verifies it. `Evidence` is what
-    /// a receipt keeps; `Attestation` is what was verified, with the key to encrypt to.
-    pub fn attest(
-        &self,
-        model: &str,
-        allow_unpatched_model: bool,
-    ) -> Result<(Evidence, Attestation)> {
-        let nonce = hex::encode(crate::random::<32>());
-        let mut report = self.attestation_report(model, &nonce)?;
-        if let Some(map) = report.as_object_mut() {
-            map.remove("ohttp_key_config");
-            map.remove("ohttp_attestation");
-        }
-        let attestation = attest::verify_attestation(
+    /// Fetch fresh evidence and verify every returned model before inference.
+    pub fn attest(&self, model: &str) -> Result<Attestation> {
+        let nonce = hex::encode(discovery_protocol::random_bytes::<32>()?);
+        let report = self.attestation_report(model, &nonce)?;
+        attest::verify_attestation(
             &report,
             &nonce,
             &Options {
                 verify_quote: &verify_quote_live,
                 nvidia: &LiveNvidia,
-                gpu_token: None,
-                gpu_tokens: None,
-                allow_unpatched_model,
             },
-        )?;
-        let evidence = Evidence {
-            nonce,
-            report,
-            model_gpu_tokens: attestation
-                .models
-                .iter()
-                .map(|m| m.gpu_token.clone())
-                .collect(),
-            model_gpu_keys: attestation
-                .models
-                .iter()
-                .map(|m| m.gpu_key.clone())
-                .collect(),
-            gpu_token: attestation.model.gpu_token.clone(),
-            gpu_key: Some(attestation.model.gpu_key.clone()),
-            allow_unpatched_model,
-        };
-        Ok((evidence, attestation))
+        )
     }
 
     /// One private turn: the request end-to-end encrypted to the attested model
@@ -470,29 +383,26 @@ impl NearAi {
     pub fn signed_turn(
         &self,
         model: &str,
-        public_key: &str,
         e2ee: &Session,
         messages: &[Value],
         effort: &str,
         max_tokens: u64,
-    ) -> Result<Turn> {
+    ) -> Result<String> {
         let messages = e2ee.encrypt_request(messages)?;
         let body = json!({ "model": model, "messages": messages, "max_tokens": max_tokens, "reasoning_effort": effort });
         let chat = self.chat(&e2ee.headers(), body)?;
         let reply = e2ee.decrypt_stream(&chat.events)?;
-        let id = reply.id.clone().ok_or_else(|| anyhow!("reply has no id"))?;
+        let id = reply
+            .id
+            .as_deref()
+            .ok_or_else(|| anyhow!("reply has no id"))?;
         let (request_sha256, response_sha256) = (sha256(&chat.request), sha256(&chat.response));
-        let signature = self.signature(&id, model)?;
+        let signature = self.signature(id, model)?;
         check_signature(
             &signature,
             &signed_text(model, &request_sha256, &response_sha256),
-            public_key,
+            e2ee.model_public_key(),
         )?;
-        Ok(Turn {
-            reply: reply.message,
-            finish_reason: reply.finish_reason,
-            usage: reply.usage,
-            record: json!({ "id": id, "request_sha256": request_sha256, "response_sha256": response_sha256, "signature": signature }),
-        })
+        Ok(reply.content)
     }
 }

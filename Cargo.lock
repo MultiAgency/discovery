@@ -201,15 +201,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bs58"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
-dependencies = [
- "tinyvec",
-]
-
-[[package]]
 name = "byte-slice-cast"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -660,10 +651,8 @@ name = "discovery-cli"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "bs58",
  "clap",
  "discovery-protocol",
- "getrandom 0.3.4",
  "hex",
  "serde",
  "serde_json",
@@ -675,29 +664,16 @@ name = "discovery-module"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
- "discovery-nearai",
- "discovery-protocol",
- "getrandom 0.3.4",
- "hex",
- "outlayer",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "discovery-nearai"
-version = "0.1.0"
-dependencies = [
- "anyhow",
  "asn1_der",
  "base64 0.22.1",
  "chacha20poly1305",
  "dcap-qvl",
+ "discovery-protocol",
  "ed25519-dalek",
  "getrandom 0.3.4",
  "hex",
  "hkdf",
+ "outlayer",
  "p384 0.13.1",
  "pem 3.0.6",
  "serde",
@@ -711,10 +687,7 @@ dependencies = [
 name = "discovery-protocol"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "bs58",
  "chacha20poly1305",
- "ed25519-dalek",
  "getrandom 0.3.4",
  "hex",
  "hkdf",
@@ -769,7 +742,6 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
- "pkcs8",
  "signature 2.2.0",
 ]
 
@@ -781,10 +753,8 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "serde",
  "sha2 0.10.9",
  "subtle",
- "zeroize",
 ]
 
 [[package]]
@@ -1849,12 +1819,6 @@ dependencies = [
  "displaydoc",
  "zerovec",
 ]
-
-[[package]]
-name = "tinyvec"
-version = "1.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "toml_datetime"

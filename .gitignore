@@ -1,8 +1,9 @@
 .outlayer/
 .outlayer-research/
+.outlayer-organizer/
 .spike-secrets/
 target/
 
-# Local respondent identity; also ignore legacy custody files
+# Historical local secrets: never commit legacy credentials
 respondent-secret
 custody-anchor.json

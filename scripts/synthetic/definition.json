@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "title": "Joining a survey through an agent",
+  "target": { "repo": "MultiAgency/discovery", "number": 1 },
+  "deadline_ns": 0,
+  "questions": [
+    { "id": "workflow", "prompt": "What were you or your agent trying to accomplish when preparing to join a survey?" },
+    { "id": "obstacle", "prompt": "What was difficult, unclear or error-prone? What did you try, and what happened?" },
+    { "id": "outcome", "prompt": "What would joining need to make possible, and what verification or disclosure control must it preserve?" }
+  ],
+  "rules": { "no_direct_quotes": true, "withheld_terms": [] }
+}

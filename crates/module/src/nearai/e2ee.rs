@@ -1,4 +1,4 @@
-// Derived from MultiAgency/private-ai@dd469a5 app/src/e2ee.rs. Local changes: VENDORED.md.
+// Derived from MultiAgency/private-ai@dd469a5 app/src/e2ee.rs. Local changes: module documentation in mod.rs.
 //! End-to-end encryption to an attested model key, NEAR AI Cloud's E2EE v2:
 //! X25519 ECDH, HKDF-SHA256 and XChaCha20-Poly1305. Each encrypted field is hex
 //! of [ephemeral public key (32)][nonce (24)][ciphertext + tag]. Port of
@@ -7,12 +7,11 @@ use anyhow::{anyhow, Context, Result};
 use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use hkdf::Hkdf;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const INFO: &[u8] = b"ed25519_encryption";
-const TEXT_FIELDS: [&str; 4] = ["content", "reasoning_content", "reasoning", "refusal"];
 
 fn symmetric_key(shared: &[u8; 32]) -> [u8; 32] {
     let mut key = [0u8; 32];
@@ -22,9 +21,9 @@ fn symmetric_key(shared: &[u8; 32]) -> [u8; 32] {
     key
 }
 
-pub fn seal(plaintext: &str, recipient: &PublicKey) -> Result<String> {
-    let ephemeral = StaticSecret::from(crate::random::<32>());
-    let nonce = crate::random::<24>();
+fn seal(plaintext: &str, recipient: &PublicKey) -> Result<String> {
+    let ephemeral = StaticSecret::from(discovery_protocol::random_bytes::<32>()?);
+    let nonce = discovery_protocol::random_bytes::<24>()?;
     let shared = ephemeral.diffie_hellman(recipient);
     if !shared.was_contributory() {
         return Err(anyhow!("weak encryption public key"));
@@ -39,8 +38,8 @@ pub fn seal(plaintext: &str, recipient: &PublicKey) -> Result<String> {
     Ok(hex::encode(out))
 }
 
-pub fn open(hex: &str, secret: &StaticSecret) -> Result<String> {
-    let data = crate::bytes(hex)?;
+fn open(hex: &str, secret: &StaticSecret) -> Result<String> {
+    let data = crate::nearai::bytes(hex)?;
     if data.len() < 56 {
         return Err(anyhow!("ciphertext too short"));
     }
@@ -57,9 +56,9 @@ pub fn open(hex: &str, secret: &StaticSecret) -> Result<String> {
 }
 
 /// The X25519 key an Ed25519 public key encrypts to.
-pub fn montgomery(ed25519_public_hex: &str) -> Result<PublicKey> {
+fn montgomery(ed25519_public_hex: &str) -> Result<PublicKey> {
     let key = VerifyingKey::from_bytes(
-        &crate::bytes(ed25519_public_hex)?
+        &crate::nearai::bytes(ed25519_public_hex)?
             .try_into()
             .map_err(|_| anyhow!("model key is not 32 bytes"))?,
     )?;
@@ -72,9 +71,7 @@ pub fn montgomery(ed25519_public_hex: &str) -> Result<PublicKey> {
 /// What a streamed reply carries, decrypted.
 pub struct StreamReply {
     pub id: Option<String>,
-    pub message: Value,
-    pub finish_reason: Option<String>,
-    pub usage: Option<Value>,
+    pub content: String,
 }
 
 /// One exchange's keys: a fresh client key pair, and the model's verified Ed25519 key.
@@ -87,13 +84,17 @@ pub struct Session {
 
 impl Session {
     pub fn new(model_public_key_hex: &str) -> Result<Self> {
-        let client = SigningKey::from_bytes(&crate::random::<32>());
+        let client = SigningKey::from_bytes(&discovery_protocol::random_bytes::<32>()?);
         Ok(Self {
             client_x25519: StaticSecret::from(client.to_scalar_bytes()),
             client,
             model_x25519: montgomery(model_public_key_hex)?,
             model_public_key: model_public_key_hex.to_string(),
         })
+    }
+
+    pub fn model_public_key(&self) -> &str {
+        &self.model_public_key
     }
 
     pub fn headers(&self) -> Vec<(&'static str, String)> {
@@ -126,35 +127,17 @@ impl Session {
             .collect()
     }
 
-    /// The reply a stream carries. Each fragment of each field is encrypted on
-    /// its own, so fragments are opened before they are joined: text fields by
-    /// concatenation, tool calls by their index.
+    /// Open and join answer fragments. The survey does not consume reasoning
+    /// fields; the signed-turn checker still authenticates the complete stream.
     pub fn decrypt_stream(&self, events: &[Value]) -> Result<StreamReply> {
-        let mut message = Map::new();
-        message.insert("role".into(), json!("assistant"));
-        message.insert("content".into(), json!(""));
-        message.insert("reasoning_content".into(), json!(""));
-        let (mut finish_reason, mut usage) = (None, None);
+        let mut content = String::new();
         for event in events {
-            if !event["usage"].is_null() {
-                usage = Some(event["usage"].clone());
-            }
             let Some(choice) = event["choices"].get(0) else {
                 continue;
             };
-            if let Some(reason) = choice["finish_reason"].as_str() {
-                finish_reason = Some(reason.to_string());
-            }
             let delta = &choice["delta"];
-            for field in TEXT_FIELDS {
-                if let Some(fragment) = delta[field].as_str().filter(|s| !s.is_empty()) {
-                    let joined = format!(
-                        "{}{}",
-                        message.get(field).and_then(Value::as_str).unwrap_or(""),
-                        open(fragment, &self.client_x25519)?
-                    );
-                    message.insert(field.into(), json!(joined));
-                }
+            if let Some(fragment) = delta["content"].as_str().filter(|s| !s.is_empty()) {
+                content.push_str(&open(fragment, &self.client_x25519)?);
             }
             if delta
                 .get("tool_calls")
@@ -168,9 +151,7 @@ impl Session {
                 .first()
                 .and_then(|e| e["id"].as_str())
                 .map(String::from),
-            message: Value::Object(message),
-            finish_reason,
-            usage,
+            content,
         })
     }
 }
@@ -199,6 +180,18 @@ mod tests {
             open(messages[0]["content"].as_str().unwrap(), &secret).unwrap(),
             "private text"
         );
+        let client = PublicKey::from(&session.client_x25519);
+        let reply = session
+            .decrypt_stream(&[
+                json!({"id":"chat", "choices":[{"delta":{
+                    "content":seal("first ", &client).unwrap(),
+                    "reasoning_content":"unused reasoning is not decrypted"
+                }}]}),
+                json!({"choices":[{"delta":{"content":seal("second", &client).unwrap()}}]}),
+            ])
+            .unwrap();
+        assert_eq!(reply.id.as_deref(), Some("chat"));
+        assert_eq!(reply.content, "first second");
         assert!(session
             .encrypt_request(&[
                 json!({"role":"user", "content":[{"type":"text", "text":"private"}]})

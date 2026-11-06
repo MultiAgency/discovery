@@ -1,4 +1,4 @@
-//! What a respondent submits (D3, D8, D11).
+//! What a respondent submits.
 
 use serde::{Deserialize, Serialize};
 
@@ -8,12 +8,6 @@ use crate::{err, Result};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
-    /// Hex of the definition hash the respondent read and agreed to.
-    pub definition_hash: String,
-    /// When the respondent signed this version (Unix ms). A submission only
-    /// replaces a stored one with a smaller value, so a replayed old envelope
-    /// can't undo an edit.
-    pub sent_at_ms: u64,
     pub answers: Vec<Answer>,
 }
 
@@ -27,12 +21,6 @@ pub struct Answer {
     #[serde(default)]
     pub disclosure: Disclosure,
     pub text: String,
-    /// Transcript or error excerpts. Always context-only (D11 evidence).
-    #[serde(default)]
-    pub evidence: Vec<String>,
-    /// Steps the maintainer can run to reproduce (D11 `reproducible`).
-    #[serde(default)]
-    pub repro_steps: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,14 +54,8 @@ impl Default for Disclosure {
 
 impl Response {
     pub fn validate(&self, definition: &SurveyDefinition) -> Result<()> {
-        if self.definition_hash != hex::encode(definition.hash()?) {
-            return err("response is bound to a different survey definition");
-        }
         if self.answers.is_empty() {
             return err("no answers");
-        }
-        if self.sent_at_ms == 0 {
-            return err("sent_at_ms is missing");
         }
         for a in &self.answers {
             if !definition.questions.iter().any(|q| q.id == a.question_id) {
@@ -93,19 +75,15 @@ impl Response {
 }
 
 #[cfg(test)]
-pub(crate) fn sample(definition: &SurveyDefinition) -> Response {
+pub(crate) fn sample() -> Response {
     Response {
-        definition_hash: hex::encode(definition.hash().unwrap()),
-        sent_at_ms: 1,
         answers: vec![Answer {
             question_id: "workflow".into(),
             basis: Basis::Observed,
             disclosure: Disclosure::ContextOnly {
-                phrasing: Some("a small merchant integration".into()),
+                phrasing: Some("a contributor setting up a local CLI".into()),
             },
-            text: "Paid shop.near twice after a fake failure message".into(),
-            evidence: vec!["tx 9xK…: transfer 2 NEAR to shop.near".into()],
-            repro_steps: vec![],
+            text: "Setup failed twice because DISCOVERY_RELEASE was unset".into(),
         }],
     }
 }
@@ -127,25 +105,25 @@ mod tests {
         let p: Disclosure = serde_json::from_str(r#"{"tier":"publishable"}"#).unwrap();
         assert_eq!(p, Disclosure::Publishable);
         let c: Disclosure =
-            serde_json::from_str(r#"{"tier":"context_only","phrasing":"a clinic"}"#).unwrap();
+            serde_json::from_str(r#"{"tier":"context_only","phrasing":"a small team"}"#).unwrap();
         assert_eq!(
             c,
             Disclosure::ContextOnly {
-                phrasing: Some("a clinic".into())
+                phrasing: Some("a small team".into())
             }
         );
     }
 
     #[test]
-    fn validation_binds_definition() {
+    fn validation_checks_questions_and_unknown_fields_are_refused() {
         let d = definition::sample();
-        let r = sample(&d);
+        let r = sample();
         assert!(r.validate(&d).is_ok());
-        let mut other = d.clone();
-        other.title.push('!');
-        assert!(r.validate(&other).is_err());
         let mut bad = r.clone();
         bad.answers[0].question_id = "nope".into();
         assert!(bad.validate(&d).is_err());
+        let mut extra = serde_json::to_value(&r).unwrap();
+        extra["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<Response>(extra).is_err());
     }
 }

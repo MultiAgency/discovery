@@ -1,54 +1,32 @@
-//! The released report: the only thing `Finalize` publishes (D4, D11).
+//! The released report: the only thing `Finalize` publishes.
 
 use serde::{Deserialize, Serialize};
 
-use crate::definition::{SurveyKind, Target};
+use crate::definition::Target;
 use crate::response::Basis;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Report {
     pub survey_id: String,
-    pub kind: SurveyKind,
     pub title: String,
     pub target: Target,
     pub status: Status,
-    pub counts: Counts,
     /// What the model wrote, after checks. Empty when withheld.
     pub body: Body,
     /// Model used for synthesis (canonical NEAR AI id).
     pub model: String,
-    /// SHA-256 of the receipt: attestation evidence and every signed model
-    /// turn, committed to this report's body. `None` when no model was called.
-    #[serde(default)]
-    pub receipt_sha256: Option<String>,
-    /// Fixed disclosure of the report's reliability limits (D11).
-    pub limits: Vec<String>,
-    /// Why synthesis attempts were rejected. Only populated by module builds
-    /// with the `diagnostics` feature, which run on synthetic data in the dev
-    /// project and can't pass a respondent's release verification.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Released,
-    /// The publication checks failed twice; nothing from the responses is published.
+    /// Every synthesis attempt failed the checks; nothing from the responses is published.
     Withheld,
 }
 
-/// Context only, never the case for a finding (D11).
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Counts {
-    pub responses: u32,
-    /// Near-identical responses grouped for weighting; no evidence is dropped.
-    pub merged: u32,
-}
-
-/// The part the model writes. Its JSON schema is [`Body::schema`].
+/// Checked publication content. Private draft fields are not accepted here.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Body {
@@ -63,25 +41,9 @@ pub struct Body {
 #[serde(deny_unknown_fields)]
 pub struct Finding {
     pub statement: String,
-    pub evidence: EvidenceClass,
-    /// Steps a maintainer can run. Required for `reproducible`.
-    pub repro_steps: Vec<String>,
-    /// Survey question this finding addresses, when applicable.
-    pub question_id: Option<String>,
     /// Derived from authorized source answers, never assigned by the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub basis: Vec<Basis>,
-    /// Private draft provenance. Never serialized in a released report.
-    #[serde(default, skip_serializing)]
-    pub source_ids: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceClass {
-    Reproducible,
-    EvidenceBacked,
-    Reported,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -92,9 +54,7 @@ pub struct CriterionChange {
     pub rationale: String,
 }
 
-pub const LIMITS: [&str; 4] = [
-    "Respondents are not verified users; identities are free to create, so counts are context, not evidence.",
-    "Findings are weighted by evidence: reproducible findings can be checked by the maintainer regardless of who submitted them.",
+pub const LIMITS: [&str; 2] = [
     "Combinations of approved phrasings could still identify a respondent to someone who already knows them.",
     "Response counts and submission times are visible in OutLayer's public job log; identities are not.",
 ];
@@ -103,10 +63,7 @@ impl Body {
     /// Every string the model wrote, for the publication checks.
     pub fn strings(&self) -> Vec<&str> {
         let mut out = vec![self.summary.as_str()];
-        for f in &self.findings {
-            out.push(&f.statement);
-            out.extend(f.repro_steps.iter().map(String::as_str));
-        }
+        out.extend(self.findings.iter().map(|f| f.statement.as_str()));
         out.extend(self.disagreements.iter().map(String::as_str));
         out.extend(self.open_questions.iter().map(String::as_str));
         for c in &self.acceptance_criteria {
@@ -114,64 +71,15 @@ impl Body {
         }
         out
     }
-
-    /// Model draft schema. Source IDs are private; basis is derived after parsing.
-    pub fn schema() -> serde_json::Value {
-        use serde_json::json;
-        let strings = json!({ "type": "array", "items": { "type": "string" } });
-        let nullable = |t: serde_json::Value| json!({ "anyOf": [t, { "type": "null" }] });
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["summary", "findings", "disagreements", "open_questions", "acceptance_criteria"],
-            "properties": {
-                "summary": { "type": "string" },
-                "findings": { "type": "array", "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["statement", "evidence", "repro_steps", "question_id", "source_ids"],
-                    "properties": {
-                        "statement": { "type": "string" },
-                        "evidence": { "type": "string", "enum": ["reproducible", "evidence_backed", "reported"] },
-                        "repro_steps": strings,
-                        "question_id": nullable(json!({ "type": "string" })),
-                        "source_ids": strings
-                    }
-                }},
-                "disagreements": strings,
-                "open_questions": strings,
-                "acceptance_criteria": { "type": "array", "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["criterion", "change", "rationale"],
-                    "properties": {
-                        "criterion": { "type": "string" },
-                        "change": { "type": "string" },
-                        "rationale": { "type": "string" }
-                    }
-                }}
-            }
-        })
-    }
 }
 
 impl Report {
-    /// What a receipt commits to: this survey and this report body.
-    pub fn subject(&self) -> serde_json::Value {
-        serde_json::json!({ "survey_id": self.survey_id, "body": self.body })
-    }
-
     pub fn markdown(&self) -> String {
-        let mut s = format!("## Survey report: {}\n\n", self.title);
+        let mut s = format!("## Survey report: {}\n\n", esc(&self.title));
         s += &format!(
-            "Survey `{}` · {} responses · model `{}`{}\n\n",
+            "Survey `{}` · model `{}`\n\n",
             &self.survey_id[..12.min(self.survey_id.len())],
-            self.counts.responses,
             self.model,
-            self.receipt_sha256
-                .as_ref()
-                .map(|h| format!(" · receipt `{}`", &h[..12.min(h.len())]))
-                .unwrap_or_default()
         );
         if self.status == Status::Withheld {
             s += "**This report could not be released under the disclosure rules.** No response content is published, and the responses have been discarded.\n\n";
@@ -181,31 +89,21 @@ impl Report {
             if !b.findings.is_empty() {
                 s += "### Findings\n\n";
                 for f in &b.findings {
-                    let class = match f.evidence {
-                        EvidenceClass::Reproducible => "reproducible",
-                        EvidenceClass::EvidenceBacked => "evidence-backed",
-                        EvidenceClass::Reported => "reported",
-                    };
-                    let basis = if f.basis.is_empty() {
-                        String::new()
+                    let basis = f
+                        .basis
+                        .iter()
+                        .map(|b| match b {
+                            Basis::Confirmed => "confirmed by a human",
+                            Basis::Observed => "observed by an agent",
+                            Basis::Interpretation => "interpretation",
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    s += &if basis.is_empty() {
+                        format!("- {}\n", esc(&f.statement))
                     } else {
-                        format!(
-                            " · {}",
-                            f.basis
-                                .iter()
-                                .map(|b| match b {
-                                    Basis::Confirmed => "confirmed by a human",
-                                    Basis::Observed => "observed by an agent",
-                                    Basis::Interpretation => "interpretation",
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
+                        format!("- **[{basis}]** {}\n", esc(&f.statement))
                     };
-                    s += &format!("- **[{class}{basis}]** {}\n", esc(&f.statement));
-                    for step in &f.repro_steps {
-                        s += &format!("  1. {}\n", esc(step));
-                    }
                 }
                 s += "\n";
             }
@@ -224,15 +122,8 @@ impl Report {
                 s += "\n";
             }
         }
-        if !self.diagnostics.is_empty() {
-            s += "### Diagnostics (development build)\n\n";
-            for d in &self.diagnostics {
-                s += &format!("- {d}\n");
-            }
-            s += "\n";
-        }
         s += "<details><summary>Limits</summary>\n\n";
-        for l in &self.limits {
+        for l in LIMITS {
             s += &format!("- {l}\n");
         }
         s += "\n</details>\n";
@@ -268,22 +159,17 @@ mod tests {
     fn markdown_neutralizes_mentions_and_html() {
         let r = Report {
             survey_id: "abc".into(),
-            kind: crate::definition::SurveyKind::IssueSurvey,
-            title: "t".into(),
+            title: "Survey @octocat <img src=x>".into(),
             target: Target {
                 repo: "o/r".into(),
                 number: 1,
             },
             status: Status::Released,
-            counts: Counts::default(),
             body: Body {
                 summary: "ping @octocat <img src=x>".into(),
                 ..Default::default()
             },
             model: "m".into(),
-            receipt_sha256: None,
-            limits: vec![],
-            diagnostics: vec![],
         };
         let md = r.markdown();
         assert!(!md.contains("@octocat") && !md.contains("<img"), "{md}");
@@ -291,35 +177,24 @@ mod tests {
     }
 
     #[test]
-    fn body_round_trips_through_schema_shape() {
+    fn publication_text_includes_every_model_string() {
         let json = serde_json::json!({
             "summary": "s",
-            "findings": [{ "statement": "x", "evidence": "reproducible", "repro_steps": ["a"], "question_id": null }],
-            "disagreements": [], "open_questions": [], "acceptance_criteria": []
+            "findings": [{ "statement": "x" }],
+            "disagreements": ["d"], "open_questions": ["o"],
+            "acceptance_criteria": [{ "criterion": "c", "change": "h", "rationale": "r" }]
         });
         let b: Body = serde_json::from_value(json).unwrap();
-        assert_eq!(b.findings[0].evidence, EvidenceClass::Reproducible);
-        assert_eq!(b.strings(), vec!["s", "x", "a"]);
+        assert_eq!(b.strings(), vec!["s", "x", "d", "o", "c", "h", "r"]);
     }
 
     #[test]
-    fn removed_report_extensions_are_rejected() {
-        let body = serde_json::json!({
+    fn private_draft_source_ids_are_rejected() {
+        let draft = serde_json::json!({
             "summary": "s",
-            "findings": [{ "statement": "x", "evidence": "reported", "repro_steps": [], "question_id": null }],
+            "findings": [{ "statement": "x", "source_ids": ["S1.1"] }],
             "disagreements": [], "open_questions": [], "acceptance_criteria": []
         });
-        let mut tasks = body.clone();
-        tasks["suggested_tasks"] = serde_json::json!([]);
-        assert!(serde_json::from_value::<Body>(tasks).is_err());
-        for field in ["verdict", "severity", "failure_scenario"] {
-            let mut review = body.clone();
-            review["findings"][0][field] = serde_json::json!("unsupported");
-            assert!(serde_json::from_value::<Body>(review).is_err());
-        }
-        assert!(serde_json::from_value::<Counts>(serde_json::json!({
-            "responses": 1, "merged": 0, "anchored": 0
-        }))
-        .is_err());
+        assert!(serde_json::from_value::<Body>(draft).is_err());
     }
 }

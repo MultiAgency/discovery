@@ -1,0 +1,22 @@
+{
+  "answers": [
+    {
+      "question_id": "workflow",
+      "basis": "observed",
+      "disclosure": { "tier": "context_only" },
+      "text": "SYNTHETIC: Running the CLI on qa-runner-3.internal.example.invalid for the payments team."
+    },
+    {
+      "question_id": "obstacle",
+      "basis": "confirmed",
+      "disclosure": { "tier": "context_only" },
+      "text": "SYNTHETIC: Verification failed because the proxy at 10.20.30.40 rewrote the RPC response."
+    },
+    {
+      "question_id": "outcome",
+      "basis": "interpretation",
+      "disclosure": { "tier": "context_only" },
+      "text": "SYNTHETIC: Verification has to work behind a corporate proxy without revealing our network layout."
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "answers": [
+    {
+      "question_id": "workflow",
+      "basis": "interpretation",
+      "disclosure": { "tier": "publishable" },
+      "text": "SYNTHETIC: My agent found the survey through an issue link and had to decide on its own whether the encryption key could be trusted."
+    },
+    {
+      "question_id": "obstacle",
+      "basis": "observed",
+      "disclosure": { "tier": "context_only" },
+      "text": "SYNTHETIC: The agent copied ticket 88231947 from ops.synthetic-corp.example.invalid into its draft before noticing that answers cannot be edited later."
+    },
+    {
+      "question_id": "outcome",
+      "basis": "confirmed",
+      "disclosure": { "tier": "publishable" },
+      "text": "SYNTHETIC: Show me the exact answers, their basis and permissions for approval before anything is encrypted."
+    }
+  ]
+}

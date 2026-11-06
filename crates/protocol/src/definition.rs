@@ -1,30 +1,22 @@
-//! The survey definition: fixed at `InitSurvey`, bound to every response by its hash (D10).
+//! The survey definition: fixed at `InitSurvey`, bound to every response by its hash.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{err, sha256, Hash, Result};
 
-pub const DEFINITION_VERSION: u32 = 1;
+pub const DEFINITION_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SurveyDefinition {
     pub version: u32,
-    pub kind: SurveyKind,
     pub title: String,
     pub target: Target,
     /// Earliest NEAR block timestamp (nanoseconds) at which `Finalize` may run.
-    /// HTTPS submissions remain accepted until finalization closes collection (D10).
+    /// HTTPS submissions remain accepted until finalization closes collection.
     pub deadline_ns: u64,
     pub questions: Vec<Question>,
     pub rules: DisclosureRules,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SurveyKind {
-    /// Evidence about an issue: workflows, obstacles, outcomes.
-    IssueSurvey,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -43,7 +35,7 @@ pub struct Question {
 }
 
 /// Organizer-chosen restrictions. They can only tighten the service's own
-/// publication checks, never loosen them or a respondent's tiers (§6).
+/// publication checks, never loosen them or a respondent's tiers.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DisclosureRules {
@@ -90,7 +82,7 @@ impl SurveyDefinition {
         Ok(serde_json::to_vec(self)?)
     }
 
-    /// The survey's identity everywhere: storage names, envelopes, signatures.
+    /// The survey's identity everywhere: storage names and encrypted envelopes.
     pub fn hash(&self) -> Result<Hash> {
         Ok(sha256(&self.canonical_bytes()?))
     }
@@ -100,8 +92,7 @@ impl SurveyDefinition {
 pub(crate) fn sample() -> SurveyDefinition {
     SurveyDefinition {
         version: DEFINITION_VERSION,
-        kind: SurveyKind::IssueSurvey,
-        title: "Per-destination payment allowance".into(),
+        title: "First-run configuration".into(),
         target: Target {
             repo: "MultiAgency/discovery".into(),
             number: 1,
@@ -149,14 +140,7 @@ mod tests {
         let mut d = sample();
         d.target.repo = "nope".into();
         assert!(d.validate().is_err());
-    }
-
-    #[test]
-    fn unsupported_survey_kinds_and_zero_issue_numbers_are_rejected() {
         let mut d = sample();
-        let mut value = serde_json::to_value(&d).unwrap();
-        value["kind"] = serde_json::json!("product_review");
-        assert!(serde_json::from_value::<SurveyDefinition>(value).is_err());
         d.target.number = 0;
         assert!(d.validate().is_err());
     }

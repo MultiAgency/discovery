@@ -5,8 +5,7 @@
 //! - `s/{id}/key`: X25519 secret, replaced with an empty marker after release
 //! - `s/{id}/collection`: admission state and immutable registration-list head
 //! - `s/{id}/report`: the released report
-//! - `s/{id}/receipt/{hash}`: the report's receipt (public, stored unsealed)
-//! - `s/{id}/r/{hex mac(id:identity)}`: open/frozen response slot, then empty tombstone
+//! - `s/{id}/r/{hex mac(id:response hash)}`: open/frozen response slot, then empty tombstone
 //! - `s/{id}/i/{random}`: sealed registration metadata, no response content
 //!
 //! `{id}` is the hex definition hash, which is public. Response keys reveal
@@ -15,9 +14,8 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use discovery_protocol::definition::SurveyDefinition;
 use discovery_protocol::envelope::SurveyKey;
-use discovery_protocol::identity::Submission;
-use discovery_protocol::report::Report;
-use discovery_protocol::{Error, Result};
+use discovery_protocol::response::Response;
+use discovery_protocol::{Error, Result, SurveyStatus};
 use serde::Serialize;
 
 use crate::collection::{self, Slot};
@@ -35,9 +33,6 @@ pub fn collection_key(id: &str) -> String {
 pub fn report_key(id: &str) -> String {
     format!("s/{id}/report")
 }
-pub fn receipt_key(id: &str, hash: &str) -> String {
-    format!("s/{id}/receipt/{hash}")
-}
 pub fn responses_prefix(id: &str) -> String {
     format!("s/{id}/r/")
 }
@@ -50,18 +45,7 @@ pub struct Created {
     pub deadline_ns: u64,
 }
 
-#[derive(Serialize, Debug, PartialEq, Eq)]
-pub struct Status {
-    pub survey_id: String,
-    pub definition: SurveyDefinition,
-    pub closed: bool,
-    /// Present while the survey accepts responses; secret material is erased at release.
-    pub public_key: Option<String>,
-    /// Present once `Finalize` has released it.
-    pub report: Option<Report>,
-}
-
-/// Fixed output: no hint whether the submission was new or an edit.
+/// Fixed output: no hint whether this contribution was a retry.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Accepted {
     pub accepted: bool,
@@ -91,14 +75,12 @@ pub fn init<P: Platform>(p: &P, definition: SurveyDefinition) -> Result<Created>
 }
 
 pub fn submit<P: Platform>(p: &P, survey_id: &str, envelope_b64: &str) -> Result<Accepted> {
+    if p.mode()? != Mode::Https {
+        return Err(Error("submit runs through HTTPS only".into()));
+    }
     let definition = load_definition(p, survey_id)?;
     if collection::is_closed(p, survey_id)? {
         return Err(Error("survey is closed".into()));
-    }
-    if let Mode::Near { block_ns } = p.mode()? {
-        if block_ns >= definition.deadline_ns {
-            return Err(Error("survey is closed".into()));
-        }
     }
     let envelope = B64
         .decode(envelope_b64)
@@ -108,90 +90,57 @@ pub fn submit<P: Platform>(p: &P, survey_id: &str, envelope_b64: &str) -> Result
 
     // Past this point everything derives from plaintext. Errors leave the
     // enclave through OutLayer's front end, so they never echo it.
-    let submission: Submission =
-        serde_json::from_slice(&plaintext).map_err(|_| rejected("the submission is malformed"))?;
-    let identity = submission
-        .verify()
-        .map_err(|_| rejected("the signature does not verify"))?;
-    submission
-        .response
+    let response: Response =
+        serde_json::from_slice(&plaintext).map_err(|_| rejected("the response is malformed"))?;
+    response
         .validate(&definition)
         .map_err(|_| rejected("the response does not match the survey"))?;
-
-    let tag = p.mac(format!("{survey_id}:{}", identity.name()).as_bytes())?;
+    // Canonical content, not ciphertext: re-encryption on a CLI retry must not
+    // create another contribution. The keyed name prevents guessed-answer lookup.
+    let canonical = serde_json::to_vec(&response)?;
+    let digest = discovery_protocol::sha256(&canonical);
+    let tag = p.mac(format!("{survey_id}:{}", hex::encode(digest)).as_bytes())?;
     let key = format!("{}{}", responses_prefix(survey_id), hex::encode(tag));
-    collection::register(p, survey_id, &key)?;
-    let sent_at_ms = submission.response.sent_at_ms;
-    let slot = Slot::Open { submission };
-    let updated = collection::seal_slot(p, &key, &slot)?;
-    for _ in 0..5 {
-        if collection::is_closed(p, survey_id)? {
-            return Err(Error("survey is closed".into()));
-        }
-        let changed = match p.get(&key)? {
-            Some(stored) => {
-                let Slot::Open {
-                    submission: previous,
-                } = collection::read_slot(p, &key, &stored)?
-                else {
-                    return Err(Error("survey is closed".into()));
-                };
-                if previous.response.sent_at_ms >= sent_at_ms {
-                    return Ok(Accepted { accepted: true });
-                }
-                p.compare_and_swap(&key, &stored, &updated)?
-            }
-            None => p.set_if_absent(&key, &updated)?,
-        };
-        if changed {
-            return Ok(Accepted { accepted: true });
-        }
-        // Another run won. Re-read and compare timestamps before retrying.
+    collection::register(p, survey_id, &key, canonical.len() as u64)?;
+    if collection::is_closed(p, survey_id)? {
+        return Err(Error("survey is closed".into()));
     }
-    Err(Error(
-        "response changed repeatedly; retry submission".into(),
-    ))
+    let slot = Slot::Open {
+        submission: response,
+    };
+    let updated = collection::seal_slot(p, &key, &slot)?;
+    if p.set_if_absent(&key, &updated)? {
+        return Ok(Accepted { accepted: true });
+    }
+    // A concurrent retry may have inserted it; a frozen/tombstoned slot is
+    // a closure fence and must never be overwritten by a delayed submission.
+    let stored = p
+        .get(&key)?
+        .ok_or_else(|| Error("response slot is missing".into()))?;
+    match collection::read_slot(p, &key, &stored)? {
+        Slot::Open { .. } => Ok(Accepted { accepted: true }),
+        _ => Err(Error("survey is closed".into())),
+    }
 }
 
 fn rejected(reason: &str) -> Error {
     Error(format!("submission rejected: {reason}"))
 }
 
-pub fn status<P: Platform>(p: &P, survey_id: &str) -> Result<Status> {
+pub fn status<P: Platform>(p: &P, survey_id: &str) -> Result<SurveyStatus> {
     let records = Records(p);
     let definition = load_definition(p, survey_id)?;
-    let public_key = match records.get(&secret_key(survey_id))? {
-        Some(bytes) if bytes.is_empty() => None,
-        Some(_) => Some(hex::encode(load_key(p, survey_id)?.public())),
-        None => None,
-    };
-    let report = match records.get(&report_key(survey_id))? {
-        Some(bytes) => Some(serde_json::from_slice(&bytes)?),
-        None => None,
-    };
-    Ok(Status {
+    let key_present = records
+        .get(&secret_key(survey_id))?
+        .is_some_and(|bytes| !bytes.is_empty());
+    let report_released = p.get(&report_key(survey_id))?.is_some();
+    Ok(SurveyStatus {
         survey_id: survey_id.into(),
         definition,
         closed: collection::is_closed(p, survey_id)?,
-        public_key,
-        report,
+        key_present,
+        report_released,
     })
-}
-
-/// The receipt text, once `Finalize` has written one.
-pub fn receipt<P: Platform>(p: &P, survey_id: &str) -> Result<String> {
-    let report: Report =
-        serde_json::from_slice(&Records(p).require(&report_key(survey_id), "report")?)?;
-    let hash = report
-        .receipt_sha256
-        .ok_or_else(|| Error("no receipt for this survey".into()))?;
-    let bytes = p
-        .get(&receipt_key(survey_id, &hash))?
-        .ok_or_else(|| Error("report receipt is missing".into()))?;
-    if hex::encode(discovery_protocol::sha256_bytes(&bytes)) != hash {
-        return Err(Error("receipt does not match the report".into()));
-    }
-    String::from_utf8(bytes).map_err(|_| Error("receipt is not UTF-8".into()))
 }
 
 pub fn load_definition<P: Platform>(p: &P, id: &str) -> Result<SurveyDefinition> {
@@ -212,22 +161,19 @@ pub fn load_key<P: Platform>(p: &P, id: &str) -> Result<SurveyKey> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::platform::memory::Memory;
-    use discovery_protocol::definition::{
-        DisclosureRules, Question, SurveyKind, Target, DEFINITION_VERSION,
-    };
+pub(crate) mod fixtures {
+    use super::Created;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use discovery_protocol::definition::{DisclosureRules, Question, SurveyDefinition, Target};
     use discovery_protocol::envelope::seal;
-    use discovery_protocol::identity::RespondentKey;
-    use discovery_protocol::response::{Answer, Basis, Disclosure, Response};
+    use discovery_protocol::response::Response;
 
-    const NOW: u64 = 1_000;
+    pub const NOW: u64 = 1_000;
 
-    fn definition() -> SurveyDefinition {
+    /// One question, `q`, collecting until `NOW + 100`.
+    pub fn definition() -> SurveyDefinition {
         SurveyDefinition {
-            version: DEFINITION_VERSION,
-            kind: SurveyKind::IssueSurvey,
+            version: discovery_protocol::definition::DEFINITION_VERSION,
             title: "t".into(),
             target: Target {
                 repo: "MultiAgency/discovery".into(),
@@ -242,47 +188,36 @@ mod tests {
         }
     }
 
-    fn envelope(created: &Created, d: &SurveyDefinition, secret: u8, text: &str) -> String {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static CLOCK: AtomicU64 = AtomicU64::new(1);
-        envelope_at(
-            created,
-            d,
-            secret,
-            text,
-            CLOCK.fetch_add(1, Ordering::Relaxed),
-        )
+    /// What the CLI submits: the response sealed to the created survey's key.
+    pub fn encrypt(created: &Created, d: &SurveyDefinition, response: &Response) -> String {
+        let public = hex::decode(&created.public_key)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let plaintext = serde_json::to_vec(response).unwrap();
+        B64.encode(seal(&public, &plaintext, &d.hash().unwrap()).unwrap())
     }
+}
 
-    fn envelope_at(
-        created: &Created,
-        d: &SurveyDefinition,
-        secret: u8,
-        text: &str,
-        sent_at_ms: u64,
-    ) -> String {
-        let hash = d.hash().unwrap();
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{definition, encrypt, NOW};
+    use super::*;
+    use crate::platform::interleaving::View;
+    use crate::platform::memory::Memory;
+    use discovery_protocol::envelope::seal;
+    use discovery_protocol::response::{Answer, Basis, Disclosure, Response};
+
+    fn envelope(created: &Created, d: &SurveyDefinition, text: &str) -> String {
         let response = Response {
-            definition_hash: hex::encode(hash),
-            sent_at_ms,
             answers: vec![Answer {
                 question_id: "q".into(),
                 basis: Basis::Confirmed,
                 disclosure: Disclosure::Publishable,
                 text: text.into(),
-                evidence: vec![],
-                repro_steps: vec![],
             }],
         };
-        let sub = RespondentKey::for_survey(&[secret; 32], &hash)
-            .unwrap()
-            .sign(response)
-            .unwrap();
-        let pk: [u8; 32] = hex::decode(&created.public_key)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        B64.encode(seal(&pk, &serde_json::to_vec(&sub).unwrap(), &hash).unwrap())
+        encrypt(created, d, &response)
     }
 
     fn responses(m: &Memory, id: &str) -> usize {
@@ -312,38 +247,83 @@ mod tests {
     }
 
     #[test]
-    fn one_slot_per_respondent_and_edits_replace() {
+    fn identical_retries_are_deduplicated_but_distinct_permissions_survive() {
         let d = definition();
-        let chain = Memory::new(Mode::Near { block_ns: NOW });
-        let created = init(&chain, d.clone()).unwrap();
-        let id = created.survey_id.clone();
-        submit(&chain, &id, &envelope(&created, &d, 1, "first")).unwrap();
-        submit(&chain, &id, &envelope(&created, &d, 1, "edited")).unwrap();
-        submit(&chain, &id, &envelope(&created, &d, 2, "other")).unwrap();
-        assert_eq!(responses(&chain, &id), 2);
+        let m = Memory::new(Mode::Near { block_ns: NOW });
+        let c = init(&m, d.clone()).unwrap();
+        let first = envelope(&c, &d, "one immutable contribution");
+        submit(&View::new(&m, Mode::Https), &c.survey_id, &first).unwrap();
+        submit(&View::new(&m, Mode::Https), &c.survey_id, &first).unwrap();
+        submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &envelope(&c, &d, "one immutable contribution"),
+        )
+        .unwrap();
+        assert_eq!(responses(&m, &c.survey_id), 1);
+        let slot = m.list(&responses_prefix(&c.survey_id)).pop().unwrap();
+        let mut response = collection::test_submission(&m, &slot);
+        response.answers[0].disclosure = Disclosure::ContextOnly { phrasing: None };
+        submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &encrypt(&c, &d, &response),
+        )
+        .unwrap();
+        response.answers[0].disclosure = Disclosure::ContextOnly {
+            phrasing: Some("an approved phrasing".into()),
+        };
+        submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &encrypt(&c, &d, &response),
+        )
+        .unwrap();
+        let frozen = collection::freeze(&m, &c.survey_id).unwrap();
+        assert_eq!(frozen.len(), 3);
+        assert!(frozen
+            .iter()
+            .any(|r| matches!(r.answers[0].disclosure, Disclosure::Publishable)));
+        assert!(frozen.iter().any(|r| matches!(
+            r.answers[0].disclosure,
+            Disclosure::ContextOnly { phrasing: Some(_) }
+        )));
     }
 
     #[test]
-    fn closed_and_past_deadline_refuse() {
+    fn concurrent_identical_inserts_keep_one_immutable_response() {
+        use crate::platform::interleaving::View;
         let d = definition();
-        let chain = Memory::new(Mode::Near { block_ns: NOW });
-        let created = init(&chain, d.clone()).unwrap();
-        let env = envelope(&created, &d, 1, "x");
+        let m = Memory::new(Mode::Near { block_ns: NOW });
+        let c = init(&m, d.clone()).unwrap();
+        let envelope = envelope(&c, &d, "retry");
+        let mut delayed = View::new(&m, Mode::Https);
+        delayed.prefix = responses_prefix(&c.survey_id);
+        *delayed.before_write.borrow_mut() = Some(Box::new(|| {
+            submit(&View::new(&m, Mode::Https), &c.survey_id, &envelope).unwrap();
+        }));
+        assert!(submit(&delayed, &c.survey_id, &envelope).unwrap().accepted);
+        assert_eq!(responses(&m, &c.survey_id), 1);
+    }
 
-        let late = Memory {
-            mode: Mode::Near {
-                block_ns: NOW + 100,
-            },
-            store: chain.store.clone(),
-        };
-        assert!(submit(&late, &created.survey_id, &env).is_err());
-
-        collection::close(&chain, &created.survey_id).unwrap();
-        let https = Memory {
-            mode: Mode::Https,
-            store: chain.store.clone(),
-        };
-        assert!(submit(&https, &created.survey_id, &env).is_err());
+    #[test]
+    fn response_storage_names_do_not_expose_plaintext_or_an_unkeyed_digest() {
+        let d = definition();
+        let m = Memory::new(Mode::Near { block_ns: NOW });
+        let c = init(&m, d.clone()).unwrap();
+        submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &envelope(&c, &d, "PRIVATE-CONTENT-7731"),
+        )
+        .unwrap();
+        let key = m.list(&responses_prefix(&c.survey_id)).pop().unwrap();
+        let response = collection::test_submission(&m, &key);
+        let digest = hex::encode(discovery_protocol::sha256(
+            &serde_json::to_vec(&response).unwrap(),
+        ));
+        assert!(!key.contains("PRIVATE-CONTENT-7731"));
+        assert!(!key.contains(&digest));
     }
 
     #[test]
@@ -355,26 +335,16 @@ mod tests {
         let a = init(&chain, d.clone()).unwrap();
         let b = init(&chain, other.clone()).unwrap();
         // An envelope for survey b, submitted to survey a.
-        assert!(submit(&chain, &a.survey_id, &envelope(&b, &other, 1, "x")).is_err());
+        assert!(submit(
+            &View::new(&chain, Mode::Https),
+            &a.survey_id,
+            &envelope(&b, &other, "x")
+        )
+        .is_err());
     }
 
-    #[test]
-    fn storage_keys_do_not_name_respondents() {
-        let d = definition();
-        let chain = Memory::new(Mode::Near { block_ns: NOW });
-        let created = init(&chain, d.clone()).unwrap();
-        submit(&chain, &created.survey_id, &envelope(&created, &d, 1, "x")).unwrap();
-        let hash = d.hash().unwrap();
-        let signer = RespondentKey::for_survey(&[1; 32], &hash)
-            .unwrap()
-            .public_key();
-        for k in chain.store.borrow().keys() {
-            assert!(!k.contains(&signer) && !k.contains("key:"), "{k}");
-        }
-    }
-
-    /// Finding A: errors after decryption must not echo plaintext, because
-    /// they leave the enclave through OutLayer's front end.
+    /// Errors after decryption must not echo plaintext, because they leave
+    /// the enclave through OutLayer's front end.
     #[test]
     fn post_decryption_errors_do_not_echo_plaintext() {
         let d = definition();
@@ -387,70 +357,29 @@ mod tests {
             .unwrap();
         let secret = "SECRET-PLAINTEXT-7731";
         for plaintext in [
-            format!(
-                r#"{{"response":{{"definition_hash":"x","answers":[{{"question_id":"q","basis":"{secret}","text":"t"}}]}}}}"#
-            ),
+            format!(r#"{{"answers":[{{"question_id":"q","basis":"{secret}","text":"t"}}]}}"#),
             format!(r#"{{"not json {secret}"#),
         ] {
             let env = B64.encode(seal(&pk, plaintext.as_bytes(), &hash).unwrap());
-            let e = submit(&chain, &created.survey_id, &env).unwrap_err();
+            let e = submit(&View::new(&chain, Mode::Https), &created.survey_id, &env).unwrap_err();
             assert!(!e.0.contains(secret), "{}", e.0);
         }
-        // A validly signed response with an unknown question id.
-        let sub = {
-            let response = Response {
-                definition_hash: hex::encode(hash),
-                sent_at_ms: 1,
-                answers: vec![Answer {
-                    question_id: secret.into(),
-                    basis: Basis::Confirmed,
-                    disclosure: Disclosure::Publishable,
-                    text: "t".into(),
-                    evidence: vec![],
-                    repro_steps: vec![],
-                }],
-            };
-            RespondentKey::for_survey(&[1; 32], &hash)
-                .unwrap()
-                .sign(response)
-                .unwrap()
+        // A well-formed response with an unknown question id.
+        let sub = Response {
+            answers: vec![Answer {
+                question_id: secret.into(),
+                basis: Basis::Confirmed,
+                disclosure: Disclosure::Publishable,
+                text: "t".into(),
+            }],
         };
         let env = B64.encode(seal(&pk, &serde_json::to_vec(&sub).unwrap(), &hash).unwrap());
-        let e = submit(&chain, &created.survey_id, &env).unwrap_err();
+        let e = submit(&View::new(&chain, Mode::Https), &created.survey_id, &env).unwrap_err();
         assert!(!e.0.contains(secret), "{}", e.0);
     }
 
-    /// Finding C: an older submission replayed later must not replace a newer one.
     #[test]
-    fn replayed_older_submission_is_refused() {
-        let d = definition();
-        let chain = Memory::new(Mode::Near { block_ns: NOW });
-        let created = init(&chain, d.clone()).unwrap();
-        let old = envelope_at(&created, &d, 1, "first", 100);
-        let new = envelope_at(&created, &d, 1, "edited", 200);
-        submit(&chain, &created.survey_id, &old).unwrap();
-        submit(&chain, &created.survey_id, &new).unwrap();
-        // Replays get the same reply as success but change nothing.
-        assert_eq!(
-            submit(&chain, &created.survey_id, &old).unwrap(),
-            Accepted { accepted: true }
-        );
-        assert_eq!(
-            submit(&chain, &created.survey_id, &new).unwrap(),
-            Accepted { accepted: true }
-        );
-        let store = chain.store.borrow();
-        let stored: Vec<_> = store
-            .iter()
-            .filter(|(k, _)| k.starts_with(&responses_prefix(&created.survey_id)))
-            .collect();
-        assert_eq!(stored.len(), 1);
-        let sub: Submission = collection::test_submission(&chain, stored[0].0);
-        assert_eq!(sub.response.answers[0].text, "edited");
-    }
-
-    #[test]
-    fn status_reports_key_and_definition() {
+    fn status_reports_collection_key_and_release_state() {
         let d = definition();
         let chain = Memory::new(Mode::Near { block_ns: NOW });
         let created = init(&chain, d.clone()).unwrap();
@@ -462,106 +391,30 @@ mod tests {
             &created.survey_id,
         )
         .unwrap();
-        assert_eq!(s.public_key, Some(created.public_key));
+        assert!(s.key_present);
         assert_eq!(s.definition, d);
-        assert!(!s.closed && s.report.is_none());
+        assert!(!s.closed && !s.report_released);
     }
 
-    // D10: the deadline is the earliest finalization time, not an HTTPS cutoff.
+    // The deadline is the earliest finalization time, not an HTTPS cutoff.
     #[test]
     fn https_accepts_after_deadline_until_finalization_closes_collection() {
         let d = definition();
         let mut m = Memory::new(Mode::Near { block_ns: NOW });
         let c = init(&m, d.clone()).unwrap();
-        let env = envelope(&c, &d, 1, "late response");
+        let env = envelope(&c, &d, "late response");
         m.mode = Mode::Near {
             block_ns: d.deadline_ns,
         };
-        assert!(submit(&m, &c.survey_id, &env).is_err());
+        assert!(super::submit(&m, &c.survey_id, &env).is_err());
         m.mode = Mode::Https;
-        assert!(submit(&m, &c.survey_id, &env).unwrap().accepted);
+        assert!(
+            submit(&View::new(&m, Mode::Https), &c.survey_id, &env)
+                .unwrap()
+                .accepted
+        );
         collection::close(&m, &c.survey_id).unwrap();
-        assert!(submit(&m, &c.survey_id, &env).is_err());
-    }
-
-    #[test]
-    fn interleaved_edit_never_overwrites_a_newer_response() {
-        use std::cell::Cell;
-        struct Racing<'a> {
-            inner: &'a Memory,
-            id: &'a str,
-            newer: String,
-            fired: Cell<bool>,
-        }
-        impl Platform for Racing<'_> {
-            fn mode(&self) -> Result<Mode> {
-                self.inner.mode()
-            }
-            fn encrypt(&self, p: &[u8], a: &[u8]) -> Result<Vec<u8>> {
-                self.inner.encrypt(p, a)
-            }
-            fn decrypt(&self, c: &[u8], a: &[u8]) -> Result<Vec<u8>> {
-                self.inner.decrypt(c, a)
-            }
-            fn mac(&self, d: &[u8]) -> Result<Vec<u8>> {
-                self.inner.mac(d)
-            }
-            fn get(&self, k: &str) -> Result<Option<Vec<u8>>> {
-                let old = self.inner.get(k)?;
-                if k.starts_with(&responses_prefix(self.id)) && !self.fired.replace(true) {
-                    submit(self.inner, self.id, &self.newer)?;
-                }
-                Ok(old)
-            }
-            fn set(&self, k: &str, v: &[u8]) -> Result<()> {
-                self.inner.set(k, v)
-            }
-            fn set_if_absent(&self, k: &str, v: &[u8]) -> Result<bool> {
-                self.inner.set_if_absent(k, v)
-            }
-            fn compare_and_swap(&self, k: &str, e: &[u8], v: &[u8]) -> Result<bool> {
-                self.inner.compare_and_swap(k, e, v)
-            }
-            fn list(&self, p: &str) -> Result<Vec<String>> {
-                self.inner.list(p)
-            }
-            fn delete(&self, k: &str) -> Result<bool> {
-                self.inner.delete(k)
-            }
-        }
-        for exists in [false, true] {
-            for (outer, inner) in [(200, 300), (300, 200)] {
-                let d = definition();
-                let m = Memory::new(Mode::Near { block_ns: NOW });
-                let c = init(&m, d.clone()).unwrap();
-                if exists {
-                    submit(&m, &c.survey_id, &envelope_at(&c, &d, 1, "original", 100)).unwrap();
-                }
-                let racing = Racing {
-                    inner: &m,
-                    id: &c.survey_id,
-                    newer: envelope_at(&c, &d, 1, "interleaved", inner),
-                    fired: Cell::new(false),
-                };
-                submit(
-                    &racing,
-                    &c.survey_id,
-                    &envelope_at(&c, &d, 1, "outer", outer),
-                )
-                .unwrap();
-                let key = m
-                    .list(&responses_prefix(&c.survey_id))
-                    .unwrap()
-                    .pop()
-                    .unwrap();
-                let stored: Submission = collection::test_submission(&m, &key);
-                assert_eq!(stored.response.sent_at_ms, 300);
-                assert_eq!(
-                    stored.response.answers[0].text,
-                    if outer == 300 { "outer" } else { "interleaved" }
-                );
-            }
-        }
+        assert!(submit(&View::new(&m, Mode::Https), &c.survey_id, &env).is_err());
     }
 
     #[test]
@@ -570,7 +423,7 @@ mod tests {
         let d = definition();
         let m = Memory::new(Mode::Near { block_ns: NOW });
         let created = init(&m, d.clone()).unwrap();
-        let env = envelope(&created, &d, 1, "delayed");
+        let env = envelope(&created, &d, "delayed");
         let mut submitting = View::new(&m, Mode::Https);
         submitting.prefix = responses_prefix(&created.survey_id);
         *submitting.before_write.borrow_mut() = Some(Box::new(|| {
@@ -582,37 +435,13 @@ mod tests {
             );
             crate::finalize::finalize(
                 &finalizing,
-                &crate::confidential::Confidential::new(),
+                &crate::nearai::Confidential::new(),
                 &created.survey_id,
             )
             .unwrap();
         }));
         assert!(submit(&submitting, &created.survey_id, &env).is_err());
         assert!(load_key(&m, &created.survey_id).is_err());
-    }
-
-    #[test]
-    fn a_delayed_edit_cannot_cross_freeze_or_restore_discarded_data() {
-        use crate::platform::interleaving::View;
-        let d = definition();
-        let m = Memory::new(Mode::Near { block_ns: NOW });
-        let c = init(&m, d.clone()).unwrap();
-        submit(&m, &c.survey_id, &envelope_at(&c, &d, 1, "original", 100)).unwrap();
-        let mut delayed = View::new(&m, Mode::Https);
-        delayed.prefix = responses_prefix(&c.survey_id);
-        *delayed.before_write.borrow_mut() = Some(Box::new(|| {
-            let frozen = collection::freeze(&m, &c.survey_id).unwrap();
-            assert_eq!(frozen.len(), 1);
-            assert_eq!(frozen[0].response.answers[0].text, "original");
-            collection::discard(&m, &c.survey_id).unwrap();
-        }));
-        assert!(submit(
-            &delayed,
-            &c.survey_id,
-            &envelope_at(&c, &d, 1, "delayed", 200)
-        )
-        .is_err());
-        collection::assert_discarded(&m, &c.survey_id);
     }
 
     #[test]
@@ -623,9 +452,9 @@ mod tests {
         let c = init(&m, d.clone()).unwrap();
         for identity in [1, 2] {
             submit(
-                &m,
+                &View::new(&m, Mode::Https),
                 &c.survey_id,
-                &envelope_at(&c, &d, identity, "response", 100),
+                &envelope(&c, &d, &format!("response {identity}")),
             )
             .unwrap();
         }
@@ -635,7 +464,7 @@ mod tests {
                 block_ns: NOW + 100,
             },
         );
-        let slots = m.list(&responses_prefix(&c.survey_id)).unwrap();
+        let slots = m.list(&responses_prefix(&c.survey_id));
         failing.prefix = slots[1].clone();
         failing.failures.set(1);
         assert!(collection::freeze(&failing, &c.survey_id).is_err());
@@ -648,7 +477,12 @@ mod tests {
         let frozen = collection::freeze(&m, &c.survey_id).unwrap();
         assert_eq!(frozen.len(), 2);
         assert_eq!(collection::freeze(&m, &c.survey_id).unwrap().len(), 2);
-        assert!(submit(&m, &c.survey_id, &envelope_at(&c, &d, 3, "late", 100)).is_err());
+        assert!(submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &envelope(&c, &d, "late")
+        )
+        .is_err());
     }
 
     #[test]
@@ -657,7 +491,7 @@ mod tests {
         let m = Memory::new(Mode::Near { block_ns: NOW });
         let c = init(&m, d.clone()).unwrap();
         let key = format!("{}admitted", responses_prefix(&c.survey_id));
-        collection::register(&m, &c.survey_id, &key).unwrap();
+        collection::register(&m, &c.survey_id, &key, 0).unwrap();
         assert!(collection::freeze(&m, &c.survey_id).unwrap().is_empty());
         collection::discard(&m, &c.survey_id).unwrap();
         assert!(!Records(&m)
@@ -673,16 +507,17 @@ mod tests {
         let d = definition();
         let m = Memory::new(Mode::Near { block_ns: NOW });
         let c = init(&m, d.clone()).unwrap();
-        submit(&m, &c.survey_id, &envelope_at(&c, &d, 1, "original", 100)).unwrap();
-        let key = m
-            .list(&responses_prefix(&c.survey_id))
-            .unwrap()
-            .pop()
-            .unwrap();
+        submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &envelope(&c, &d, "original"),
+        )
+        .unwrap();
+        let key = m.list(&responses_prefix(&c.survey_id)).pop().unwrap();
         let mut submission = collection::test_submission(&m, &key);
-        let max = discovery_protocol::envelope::BUCKETS[3] - 4;
+        let max = discovery_protocol::envelope::MAX_RESPONSE;
         let current = serde_json::to_vec(&submission).unwrap().len();
-        submission.response.answers[0]
+        submission.answers[0]
             .text
             .push_str(&"x".repeat(max - current));
         let slot = Slot::Open { submission };
@@ -718,16 +553,13 @@ mod tests {
                     block_ns: NOW + 100,
                 },
             );
-            let report = crate::finalize::finalize(
-                &late,
-                &crate::confidential::Confidential::new(),
-                &c.survey_id,
-            )
-            .unwrap();
-            assert_eq!(report.counts.responses, 0);
+            let report =
+                crate::finalize::finalize(&late, &crate::nearai::Confidential::new(), &c.survey_id)
+                    .unwrap();
+            assert_eq!(report.body.summary, "No responses were received.");
         }));
-        assert!(submit(&delayed, &c.survey_id, &envelope(&c, &d, 1, "not indexed")).is_err());
-        assert!(m.list(&responses_prefix(&c.survey_id)).unwrap().is_empty());
+        assert!(submit(&delayed, &c.survey_id, &envelope(&c, &d, "not indexed")).is_err());
+        assert!(m.list(&responses_prefix(&c.survey_id)).is_empty());
         collection::assert_discarded(&m, &c.survey_id);
     }
 
@@ -737,12 +569,13 @@ mod tests {
         let d = definition();
         let m = Memory::new(Mode::Near { block_ns: NOW });
         let c = init(&m, d.clone()).unwrap();
-        submit(&m, &c.survey_id, &envelope_at(&c, &d, 1, "admitted", 100)).unwrap();
-        let key = m
-            .list(&responses_prefix(&c.survey_id))
-            .unwrap()
-            .pop()
-            .unwrap();
+        submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &envelope(&c, &d, "admitted"),
+        )
+        .unwrap();
+        let key = m.list(&responses_prefix(&c.survey_id)).pop().unwrap();
         let admitted = m.get(&key).unwrap().unwrap();
         // Simulate the admitted writer paused just before its initial insert.
         m.delete(&key).unwrap();
@@ -758,7 +591,99 @@ mod tests {
         }));
         let snapshot = collection::freeze(&freezing, &c.survey_id).unwrap();
         assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].response.answers[0].text, "admitted");
+        assert_eq!(snapshot[0].answers[0].text, "admitted");
         assert!(collection::is_closed(&m, &c.survey_id).unwrap());
+    }
+
+    #[test]
+    fn distinct_responses_fill_the_byte_budget_but_admitted_retries_still_succeed() {
+        let d = definition();
+        let m = Memory::new(Mode::Near { block_ns: NOW });
+        let c = init(&m, d.clone()).unwrap();
+        let near_max = |i: usize| {
+            let mut text = format!("{i:03} ");
+            text.push_str(&"x".repeat(3900));
+            envelope(&c, &d, &text)
+        };
+        let size = {
+            let r = Response {
+                answers: vec![Answer {
+                    question_id: "q".into(),
+                    basis: Basis::Confirmed,
+                    disclosure: Disclosure::Publishable,
+                    text: format!("000 {}", "x".repeat(3900)),
+                }],
+            };
+            serde_json::to_vec(&r).unwrap().len() as u64
+        };
+        assert!(size <= discovery_protocol::envelope::MAX_RESPONSE as u64);
+        let fits = (collection::BUDGET / size) as usize;
+        for i in 0..fits {
+            submit(&View::new(&m, Mode::Https), &c.survey_id, &near_max(i)).unwrap();
+        }
+        let full = submit(&View::new(&m, Mode::Https), &c.survey_id, &near_max(fits)).unwrap_err();
+        assert_eq!(full.0, "survey is full");
+        // A re-encrypted retry of an admitted response is still accepted.
+        assert!(
+            submit(&View::new(&m, Mode::Https), &c.survey_id, &near_max(0))
+                .unwrap()
+                .accepted
+        );
+        assert_eq!(responses(&m, &c.survey_id), fits);
+        assert_eq!(collection::freeze(&m, &c.survey_id).unwrap().len(), fits);
+    }
+
+    #[test]
+    fn racing_identical_submissions_count_once_but_may_charge_the_budget_again() {
+        let d = definition();
+        let m = Memory::new(Mode::Near { block_ns: NOW });
+        let c = init(&m, d.clone()).unwrap();
+        let near_max = |i: usize| envelope(&c, &d, &format!("{i:03} {}", "x".repeat(3900)));
+        let size = {
+            let r = Response {
+                answers: vec![Answer {
+                    question_id: "q".into(),
+                    basis: Basis::Confirmed,
+                    disclosure: Disclosure::Publishable,
+                    text: format!("000 {}", "x".repeat(3900)),
+                }],
+            };
+            serde_json::to_vec(&r).unwrap().len() as u64
+        };
+        let fits = (collection::BUDGET / size) as usize;
+        // Both copies register before either writes its slot.
+        let first = near_max(0);
+        let mut delayed = View::new(&m, Mode::Https);
+        delayed.prefix = responses_prefix(&c.survey_id);
+        *delayed.before_write.borrow_mut() = Some(Box::new(|| {
+            submit(&View::new(&m, Mode::Https), &c.survey_id, &first).unwrap();
+        }));
+        submit(&delayed, &c.survey_id, &near_max(0)).unwrap();
+        assert_eq!(responses(&m, &c.survey_id), 1);
+        // The race registered the slot again, so one fewer distinct response fits.
+        for i in 1..fits - 1 {
+            submit(&View::new(&m, Mode::Https), &c.survey_id, &near_max(i)).unwrap();
+        }
+        let full = submit(
+            &View::new(&m, Mode::Https),
+            &c.survey_id,
+            &near_max(fits - 1),
+        );
+        assert_eq!(full.unwrap_err().0, "survey is full");
+        assert_eq!(
+            collection::freeze(&m, &c.survey_id).unwrap().len(),
+            fits - 1
+        );
+    }
+
+    #[test]
+    fn oversized_responses_cannot_be_sealed() {
+        let d = definition();
+        let m = Memory::new(Mode::Near { block_ns: NOW });
+        let c = init(&m, d.clone()).unwrap();
+        let public: [u8; 32] = hex::decode(&c.public_key).unwrap().try_into().unwrap();
+        let text = "x".repeat(discovery_protocol::envelope::MAX_RESPONSE);
+        assert!(seal(&public, text.as_bytes(), &d.hash().unwrap()).is_ok());
+        assert!(seal(&public, format!("{text}x").as_bytes(), &d.hash().unwrap()).is_err());
     }
 }

@@ -1,0 +1,22 @@
+{
+  "answers": [
+    {
+      "question_id": "workflow",
+      "basis": "confirmed",
+      "disclosure": { "tier": "context_only", "phrasing": "a maintainer responding on behalf of a small team" },
+      "text": "SYNTHETIC: Responding for the team behind synthetic-project-42 at team-lead@internal.example.invalid, with the agent reading our internal tracker."
+    },
+    {
+      "question_id": "obstacle",
+      "basis": "interpretation",
+      "disclosure": { "tier": "publishable" },
+      "text": "SYNTHETIC: The announcement did not say that submissions stay open until finalization, so I assumed the deadline closed collection."
+    },
+    {
+      "question_id": "outcome",
+      "basis": "confirmed",
+      "disclosure": { "tier": "context_only" },
+      "text": "SYNTHETIC: We would only join if we could check the service key ourselves before encrypting anything about our internal tracker."
+    }
+  ]
+}

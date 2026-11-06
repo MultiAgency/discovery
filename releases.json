@@ -1,12 +1,1 @@
-{
-  "releases": [
-    {
-      "network": "testnet",
-      "project": "rel1.research.agency.testnet/discovery",
-      "release": "74bd94d7990829a9f67796aeb808c6c26434f9c823614ccc94a83b1abcd5c3fa",
-      "organizer": "research.agency.testnet",
-      "locked": true,
-      "legacy_format": true
-    }
-  ]
-}
+{"service": null}

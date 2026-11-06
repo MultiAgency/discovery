@@ -1,0 +1,22 @@
+{
+  "answers": [
+    {
+      "question_id": "workflow",
+      "basis": "observed",
+      "disclosure": { "tier": "context_only", "phrasing": "a contributor joining from a managed work laptop" },
+      "text": "SYNTHETIC: Installing the discovery CLI on a managed laptop for build-farm-7.internal.example.invalid; the agent ran setup from /home/synthetic-user/work/checkout."
+    },
+    {
+      "question_id": "obstacle",
+      "basis": "observed",
+      "disclosure": { "tier": "publishable" },
+      "text": "SYNTHETIC: Verification failed with a remote error before the CLI said which local setting was missing, so the agent retried twice before finding it."
+    },
+    {
+      "question_id": "outcome",
+      "basis": "confirmed",
+      "disclosure": { "tier": "publishable" },
+      "text": "SYNTHETIC: Setup should list every missing local setting before making any network call."
+    }
+  ]
+}

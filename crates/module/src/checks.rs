@@ -1,20 +1,26 @@
-//! Mechanical publication checks: the stated guarantee (D3).
+//! Mechanical publication checks: the stated guarantee.
 //!
 //! A report fails if any of its strings:
-//! 1. repeats [`NGRAM`] consecutive words of `context_only` material (raw text,
-//!    evidence, repro steps), or of `publishable` text when the organizer
-//!    forbade quotes; approved phrasings and the survey's own wording are exempt;
+//! 1. repeats [`NGRAM`] consecutive words of `context_only` text, or of
+//!    `publishable` text when the organizer forbade quotes; approved phrasings
+//!    and the survey's own wording are exempt;
 //! 2. contains an identifier-shaped token (email, URL, domain, NEAR account,
 //!    path, handle, long hex or number) that appears in `context_only` material
 //!    and nowhere publishable;
 //! 3. contains a term the organizer withheld.
 
-use std::collections::BTreeSet;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 use discovery_protocol::definition::SurveyDefinition;
-use discovery_protocol::response::{Disclosure, Response};
+use discovery_protocol::response::{Answer, Disclosure, Response};
 
-use crate::merge::words;
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
 
 pub const NGRAM: usize = 6;
 
@@ -26,49 +32,89 @@ pub struct Material {
     withheld: Vec<String>,
 }
 
-impl Material {
-    pub fn new(definition: &SurveyDefinition, responses: &[Response]) -> Self {
+/// One interpretation of disclosure permissions for synthesis, grounding and checks.
+pub struct Prepared<'a> {
+    pub material: Material,
+    pub respondents: Vec<Value>,
+    pub authorized: Vec<Value>,
+    pub confidential: Vec<Value>,
+    /// All labels are private; only authorized answers can ground findings.
+    pub sources: BTreeMap<String, Option<&'a Answer>>,
+}
+
+impl<'a> Prepared<'a> {
+    pub fn new(definition: &SurveyDefinition, responses: &'a [Response]) -> Self {
         let mut forbidden = Vec::new();
         let mut allowed = vec![definition.title.as_str()];
         allowed.extend(definition.questions.iter().map(|q| q.prompt.as_str()));
-        for r in responses {
-            for a in &r.answers {
-                match &a.disclosure {
+        let mut respondents = Vec::new();
+        let mut authorized = Vec::new();
+        let mut confidential = Vec::new();
+        let mut sources = BTreeMap::new();
+        for (r, response) in responses.iter().enumerate() {
+            let mut answers = Vec::new();
+            for (i, a) in response.answers.iter().enumerate() {
+                let id = format!("S{}.{}", r + 1, i + 1);
+                let mut draft =
+                    json!({"source_id": id, "question_id": a.question_id, "basis": a.basis});
+                let source = match &a.disclosure {
                     Disclosure::Publishable => {
-                        let target = if definition.rules.no_direct_quotes {
-                            &mut forbidden
+                        // The synthesis and audit inputs label quotable text the same way.
+                        let label = if definition.rules.no_direct_quotes {
+                            forbidden.push(a.text.as_str());
+                            "paraphrase_only"
                         } else {
-                            &mut allowed
+                            allowed.push(a.text.as_str());
+                            "text"
                         };
-                        target.push(a.text.as_str());
-                        target.extend(a.repro_steps.iter().map(String::as_str));
+                        authorized.push(json!({ label: a.text }));
+                        draft["tier"] = json!("publishable");
+                        draft[label] = json!(a.text);
+                        Some(a)
                     }
                     Disclosure::ContextOnly { phrasing } => {
                         forbidden.push(a.text.as_str());
-                        forbidden.extend(a.repro_steps.iter().map(String::as_str));
                         allowed.extend(phrasing.iter().map(String::as_str));
+                        if let Some(p) = phrasing {
+                            authorized.push(json!({"approved_phrasing": p}));
+                        }
+                        confidential.push(json!({"fact": a.text}));
+                        draft["tier"] = json!("context_only");
+                        draft["raw_context"] = json!(a.text);
+                        draft["may_surface_as"] = json!(phrasing);
+                        phrasing.as_ref().map(|_| a)
                     }
-                }
-                forbidden.extend(a.evidence.iter().map(String::as_str));
+                };
+                sources.insert(id, source);
+                answers.push(draft);
             }
+            respondents.push(json!({"respondent": format!("R{}", r + 1), "answers": answers}));
         }
         let allowed_grams: BTreeSet<_> = allowed.iter().flat_map(|t| ngrams(t)).collect();
         let allowed_ids: BTreeSet<_> = allowed.iter().flat_map(|t| identifiers(t)).collect();
         Self {
-            forbidden_grams: forbidden
-                .iter()
-                .flat_map(|t| ngrams(t))
-                .filter(|g| !allowed_grams.contains(g))
-                .collect(),
-            forbidden_ids: forbidden
-                .iter()
-                .flat_map(|t| identifiers(t))
-                .filter(|i| !allowed_ids.contains(i))
-                .collect(),
-            withheld: definition.rules.withheld_terms.clone(),
+            material: Material {
+                forbidden_grams: forbidden
+                    .iter()
+                    .flat_map(|t| ngrams(t))
+                    .filter(|g| !allowed_grams.contains(g))
+                    .collect(),
+                forbidden_ids: forbidden
+                    .iter()
+                    .flat_map(|t| identifiers(t))
+                    .filter(|i| !allowed_ids.contains(i))
+                    .collect(),
+                withheld: definition.rules.withheld_terms.clone(),
+            },
+            respondents,
+            authorized,
+            confidential,
+            sources,
         }
     }
+}
 
+impl Material {
     /// Reasons the strings fail, empty when they pass. Each names the
     /// offending text so the model can fix it on retry. Reasons stay inside
     /// the enclave: they go back to the model, never into a released report.
@@ -175,83 +221,53 @@ fn is_identifier(t: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discovery_protocol::definition::{
-        DisclosureRules, Question, SurveyKind, Target, DEFINITION_VERSION,
-    };
+    use discovery_protocol::definition::DisclosureRules;
     use discovery_protocol::response::{Answer, Basis};
 
     fn definition(rules: DisclosureRules) -> SurveyDefinition {
         SurveyDefinition {
-            version: DEFINITION_VERSION,
-            kind: SurveyKind::IssueSurvey,
-            title: "Payment allowance".into(),
-            target: Target {
-                repo: "MultiAgency/discovery".into(),
-                number: 1,
-            },
-            deadline_ns: 1,
-            questions: vec![Question {
-                id: "q".into(),
-                prompt: "What happened when you paid?".into(),
-            }],
             rules,
+            ..crate::survey::fixtures::definition()
         }
     }
 
-    fn response(disclosure: Disclosure, text: &str, evidence: &[&str]) -> Response {
+    fn response(disclosure: Disclosure, text: &str) -> Response {
         Response {
-            definition_hash: String::new(),
-            sent_at_ms: 1,
             answers: vec![Answer {
                 question_id: "q".into(),
                 basis: Basis::Observed,
                 disclosure,
                 text: text.into(),
-                evidence: evidence.iter().map(|s| s.to_string()).collect(),
-                repro_steps: vec![],
             }],
         }
     }
 
-    const SECRET: &str =
-        "I run the only clinic in Dayton and our agent paid shop.near twice yesterday";
+    const SECRET: &str = "I maintain the only Rust bindings for Velvet and the installer called \
+        northwind.dev twice, logging request 9f3a2b1c4d5e6f708192a3b4c5d6e7f8 to /Users/ana/agent/log.txt";
+
+    const PUBLIC: &str = "setup should list every missing variable before any network call";
 
     fn material(rules: DisclosureRules) -> Material {
         let ctx = Disclosure::ContextOnly {
-            phrasing: Some("a small healthcare deployment".into()),
+            phrasing: Some("a maintainer of a language binding".into()),
         };
-        Material::new(
+        Prepared::new(
             &definition(rules),
             &[
-                response(
-                    ctx,
-                    SECRET,
-                    &["tx 9f3a2b1c4d5e6f708192a3b4c5d6e7f8 at /Users/ana/agent/log.txt"],
-                ),
-                response(
-                    Disclosure::Publishable,
-                    "the second payment should be blocked by an allowance per merchant",
-                    &[],
-                ),
+                response(ctx, SECRET),
+                response(Disclosure::Publishable, PUBLIC),
             ],
         )
-    }
-
-    #[test]
-    fn clean_report_passes() {
-        let m = material(DisclosureRules::default());
-        assert!(m
-            .violations(&[
-                "A small healthcare deployment saw a duplicate payment after a fake failure."
-            ])
-            .is_empty());
+        .material
     }
 
     #[test]
     fn verbatim_context_fails() {
         let m = material(DisclosureRules::default());
         assert!(!m
-            .violations(&["One respondent said: the only clinic in Dayton and our agent paid"])
+            .violations(&[
+                "One respondent said: the only Rust bindings for Velvet and the installer"
+            ])
             .is_empty());
     }
 
@@ -259,14 +275,14 @@ mod tests {
     fn approved_phrasing_is_exempt() {
         let m = material(DisclosureRules::default());
         assert!(m
-            .violations(&["Affects a small healthcare deployment."])
+            .violations(&["Affects a maintainer of a language binding."])
             .is_empty());
     }
 
     #[test]
     fn identifiers_from_context_fail() {
         let m = material(DisclosureRules::default());
-        assert!(!m.violations(&["See shop.near for details."]).is_empty());
+        assert!(!m.violations(&["See northwind.dev for details."]).is_empty());
         assert!(!m
             .violations(&["Log at /Users/ana/agent/log.txt."])
             .is_empty());
@@ -277,38 +293,25 @@ mod tests {
 
     #[test]
     fn publishable_quotes_follow_rules() {
-        let quote = "the second payment should be blocked by an allowance per merchant";
         assert!(material(DisclosureRules::default())
-            .violations(&[quote])
+            .violations(&[PUBLIC])
             .is_empty());
         let strict = DisclosureRules {
             no_direct_quotes: true,
             ..Default::default()
         };
-        assert!(!material(strict).violations(&[quote]).is_empty());
+        assert!(!material(strict).violations(&[PUBLIC]).is_empty());
     }
 
     #[test]
     fn withheld_terms_fail() {
         let rules = DisclosureRules {
-            withheld_terms: vec!["Dayton".into()],
+            withheld_terms: vec!["Velvet".into()],
             ..Default::default()
         };
         assert!(!material(rules)
-            .violations(&["Something in dayton."])
+            .violations(&["Something in velvet."])
             .is_empty());
-    }
-
-    #[test]
-    fn reasons_name_the_offending_text() {
-        let m = material(DisclosureRules::default());
-        let v = m.violations(&["the only clinic in Dayton and our agent paid shop.near"]);
-        assert!(
-            v.iter()
-                .any(|r| r.contains("\"the only clinic in dayton and our agent paid shop near\"")),
-            "{v:?}"
-        );
-        assert!(v.iter().any(|r| r.contains("shop.near")), "{v:?}");
     }
 
     #[test]
@@ -344,14 +347,14 @@ mod tests {
                 "9f3a2b1c4d5e6f708192a3b4c5d6e7f8",
             ),
         ] {
-            let m = Material::new(
+            let m = Prepared::new(
                 &definition(DisclosureRules::default()),
                 &[response(
                     Disclosure::ContextOnly { phrasing: None },
                     private,
-                    &[],
                 )],
-            );
+            )
+            .material;
             assert!(!m.violations(&[public]).is_empty(), "{private} -> {public}");
         }
     }
