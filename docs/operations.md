@@ -15,7 +15,8 @@ the maintainer, outside the survey service.
 The current embedded workload policy is empty. Do not collect responses with
 this source or activate it until [workload approval](workload-approval.md) is
 complete. The historical registry entry has no active creation flag. Existing
-surveys can still be finalized on their original locked release.
+surveys require the compatible earlier CLI and their original locked release;
+see [releases](releases.md).
 
 1. Approve the NEAR AI workload, build the WASI module without `diagnostics`,
    review it and deploy it as a new OutLayer project.
@@ -54,8 +55,9 @@ A write collaborator posts `/survey` with one JSON definition block on an
 existing issue. `survey.yml` validates it and matches its target before creating
 it. PR comments do not create new surveys in this MVP.
 
-`finalize.yml` scans comments every 15 minutes, including closed issues and
-historical PRs, and follows each announcement's original registered release.
+`finalize.yml` scans issue comments every 15 minutes, including closed issues,
+and follows each announcement's original registered release. Entries using the
+older removed report format are excluded and require the earlier CLI.
 Only bot-authored announcement documents schedule work. Only the CLI's full
 terminal provenance footer completes a survey; report prose never controls
 scheduling. Failed surveys are retried on the next run.

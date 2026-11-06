@@ -43,7 +43,7 @@ def live_blockers(root):
     blockers = []
     if not policy.get("approved_workloads"):
         blockers.append("The confidential model workload has not been approved. See docs/workload-approval.md.")
-    if len(active) != 1 or active[0].get("locked") is not True:
+    if len(active) != 1 or active[0].get("locked") is not True or active[0].get("legacy_format"):
         blockers.append("The release registry must contain exactly one locked active surveys release.")
     return blockers
 

@@ -46,8 +46,6 @@ pub struct Counts {
     pub responses: u32,
     /// Near-identical responses grouped for weighting; no evidence is dropped.
     pub merged: u32,
-    /// Legacy report field. New MVP reports always use zero.
-    pub anchored: u32,
 }
 
 /// The part the model writes. Its JSON schema is [`Body::schema`].
@@ -59,7 +57,6 @@ pub struct Body {
     pub disagreements: Vec<String>,
     pub open_questions: Vec<String>,
     pub acceptance_criteria: Vec<CriterionChange>,
-    pub suggested_tasks: Vec<Task>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -69,18 +66,11 @@ pub struct Finding {
     pub evidence: EvidenceClass,
     /// Steps a maintainer can run. Required for `reproducible`.
     pub repro_steps: Vec<String>,
-    /// Product reviews: the criterion (question id) this finding is about.
+    /// Survey question this finding addresses, when applicable.
     pub question_id: Option<String>,
-    /// Product reviews: the verdict for that criterion.
-    pub verdict: Option<Verdict>,
-    /// Product-review failures carry severity; absent on older reports.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub severity: Option<Severity>,
     /// Derived from authorized source answers, never assigned by the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub basis: Vec<Basis>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_scenario: Option<String>,
     /// Private draft provenance. Never serialized in a released report.
     #[serde(default, skip_serializing)]
     pub source_ids: Vec<String>,
@@ -94,38 +84,12 @@ pub enum EvidenceClass {
     Reported,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict {
-    Met,
-    NotMet,
-    Mixed,
-    /// No authorized assessment supports a conclusion for this criterion.
-    NotAssessed,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    Critical,
-    High,
-    Medium,
-    Low,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CriterionChange {
     pub criterion: String,
     pub change: String,
     pub rationale: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Task {
-    pub title: String,
-    pub detail: String,
 }
 
 pub const LIMITS: [&str; 4] = [
@@ -141,16 +105,12 @@ impl Body {
         let mut out = vec![self.summary.as_str()];
         for f in &self.findings {
             out.push(&f.statement);
-            out.extend(f.failure_scenario.iter().map(String::as_str));
             out.extend(f.repro_steps.iter().map(String::as_str));
         }
         out.extend(self.disagreements.iter().map(String::as_str));
         out.extend(self.open_questions.iter().map(String::as_str));
         for c in &self.acceptance_criteria {
             out.extend([c.criterion.as_str(), &c.change, &c.rationale]);
-        }
-        for t in &self.suggested_tasks {
-            out.extend([t.title.as_str(), &t.detail]);
         }
         out
     }
@@ -163,7 +123,7 @@ impl Body {
         json!({
             "type": "object",
             "additionalProperties": false,
-            "required": ["summary", "findings", "disagreements", "open_questions", "acceptance_criteria", "suggested_tasks"],
+            "required": ["summary", "findings", "disagreements", "open_questions", "acceptance_criteria"],
             "properties": {
                 "summary": { "type": "string" },
                 "findings": { "type": "array", "items": {
@@ -188,15 +148,6 @@ impl Body {
                         "criterion": { "type": "string" },
                         "change": { "type": "string" },
                         "rationale": { "type": "string" }
-                    }
-                }},
-                "suggested_tasks": { "type": "array", "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["title", "detail"],
-                    "properties": {
-                        "title": { "type": "string" },
-                        "detail": { "type": "string" }
                     }
                 }}
             }
@@ -235,11 +186,6 @@ impl Report {
                         EvidenceClass::EvidenceBacked => "evidence-backed",
                         EvidenceClass::Reported => "reported",
                     };
-                    let verdict = match (&f.question_id, f.verdict) {
-                        (Some(q), Some(v)) => format!(" · `{q}`: {v:?}"),
-                        _ => String::new(),
-                    };
-                    let severity = f.severity.map(|s| format!(" · {s:?}")).unwrap_or_default();
                     let basis = if f.basis.is_empty() {
                         String::new()
                     } else {
@@ -256,13 +202,7 @@ impl Report {
                                 .join(", ")
                         )
                     };
-                    s += &format!(
-                        "- **[{class}{verdict}{severity}{basis}]** {}\n",
-                        esc(&f.statement)
-                    );
-                    if let Some(scenario) = &f.failure_scenario {
-                        s += &format!("  - Failure scenario: {}\n", esc(scenario));
-                    }
+                    s += &format!("- **[{class}{basis}]** {}\n", esc(&f.statement));
                     for step in &f.repro_steps {
                         s += &format!("  1. {}\n", esc(step));
                     }
@@ -280,13 +220,6 @@ impl Report {
                         esc(&c.change),
                         esc(&c.rationale)
                     );
-                }
-                s += "\n";
-            }
-            if !b.suggested_tasks.is_empty() {
-                s += "### Suggested tasks\n\n";
-                for t in &b.suggested_tasks {
-                    s += &format!("- **{}**: {}\n", esc(&t.title), esc(&t.detail));
                 }
                 s += "\n";
             }
@@ -361,11 +294,32 @@ mod tests {
     fn body_round_trips_through_schema_shape() {
         let json = serde_json::json!({
             "summary": "s",
-            "findings": [{ "statement": "x", "evidence": "reproducible", "repro_steps": ["a"], "question_id": null, "verdict": null }],
-            "disagreements": [], "open_questions": [], "acceptance_criteria": [], "suggested_tasks": []
+            "findings": [{ "statement": "x", "evidence": "reproducible", "repro_steps": ["a"], "question_id": null }],
+            "disagreements": [], "open_questions": [], "acceptance_criteria": []
         });
         let b: Body = serde_json::from_value(json).unwrap();
         assert_eq!(b.findings[0].evidence, EvidenceClass::Reproducible);
         assert_eq!(b.strings(), vec!["s", "x", "a"]);
+    }
+
+    #[test]
+    fn removed_report_extensions_are_rejected() {
+        let body = serde_json::json!({
+            "summary": "s",
+            "findings": [{ "statement": "x", "evidence": "reported", "repro_steps": [], "question_id": null }],
+            "disagreements": [], "open_questions": [], "acceptance_criteria": []
+        });
+        let mut tasks = body.clone();
+        tasks["suggested_tasks"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<Body>(tasks).is_err());
+        for field in ["verdict", "severity", "failure_scenario"] {
+            let mut review = body.clone();
+            review["findings"][0][field] = serde_json::json!("unsupported");
+            assert!(serde_json::from_value::<Body>(review).is_err());
+        }
+        assert!(serde_json::from_value::<Counts>(serde_json::json!({
+            "responses": 1, "merged": 0, "anchored": 0
+        }))
+        .is_err());
     }
 }

@@ -4,9 +4,8 @@
 //! travels inside the envelope with its signature, and the module verifies it
 //! without any RPC lookup, since an implicit account's id is its public key.
 //!
-//! Keys are derived per survey from a local secret. Wallet identity and usage
-//! verification are outside the MVP. A legacy anchor field is decoded only so
-//! unsupported submissions can be rejected explicitly.
+//! Keys are derived per survey from a local secret; no external identity service
+//! is involved.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier, VerifyingKey};
@@ -15,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 use crate::response::Response;
-use crate::{err, random_bytes, sha256, Error, Hash, Result};
+use crate::{random_bytes, sha256, Error, Hash, Result};
 
 /// NEP-413 prefix tag: 2^31 + 413.
 const NEP413_TAG: u32 = 2_147_484_061;
@@ -32,8 +31,6 @@ pub struct Submission {
     pub nonce: String,
     /// Base64, 64 bytes, over `discovery:response:<hex sha256(response)>`.
     pub signature: String,
-    #[serde(default)]
-    pub anchor: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +51,7 @@ impl Identity {
 pub struct RespondentKey(SigningKey);
 
 impl RespondentKey {
-    /// Unanchored: a separate key per survey from one local secret.
+    /// A separate key per survey from one local secret.
     pub fn for_survey(local_secret: &[u8; 32], definition_hash: &Hash) -> Result<Self> {
         let info = format!("discovery:v1:respondent:{}", hex::encode(definition_hash));
         let mut seed = [0u8; 32];
@@ -77,7 +74,6 @@ impl RespondentKey {
             signer: self.public_key(),
             nonce: B64.encode(nonce),
             signature: B64.encode(signature.to_bytes()),
-            anchor: None,
         })
     }
 }
@@ -92,9 +88,6 @@ impl Submission {
             &self.nonce,
             &self.signature,
         )?;
-        if self.anchor.is_some() {
-            return err("wallet anchoring is not supported by this release");
-        }
         Ok(Identity::Key(signer))
     }
 }
@@ -174,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn unanchored_round_trip() {
+    fn signed_submission_round_trip() {
         let (r, h) = setup();
         let key = RespondentKey::for_survey(&[1u8; 32], &h).unwrap();
         let s = key.sign(r).unwrap();
@@ -208,30 +201,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_anchor_fields_are_rejected_instead_of_becoming_an_identity() {
+    fn unsupported_identity_fields_are_rejected() {
         let (r, h) = setup();
-        let mut submission = RespondentKey::for_survey(&[1; 32], &h)
+        let submission = RespondentKey::for_survey(&[1; 32], &h)
             .unwrap()
             .sign(r)
             .unwrap();
-        submission.anchor = Some(serde_json::json!({"wallet_account_id":"legacy"}));
-        assert!(submission.verify().is_err());
-    }
-
-    /// Signature produced by a real OutLayer testnet custody wallet (spike, 2026-11-05).
-    #[test]
-    fn outlayer_custody_signature_vector() {
-        let key = parse_key("ed25519:EsSzSSc98qp4hMmBCL7pEstABot3wTyvEjJPGY2BFprX").unwrap();
-        assert_eq!(
-            hex::encode(key),
-            "ce145b9bd4768450856549ccc62a31d01a3a491d0187a0208cdbc8723f496a84"
-        );
-        verify_nep413(
-            &key,
-            "anchor:spike-local-key-P",
-            "p+rHZzb7E6vN+EjgF2II8xtBlGp8BGf7SGXtK53DXqY=",
-            "n29LYuBGx/8QORLlHpy/5fs2s23I1E9er34MBKyKOZQ4D05fYBivo2oBLA6F70rtUGJD4GVnMsd+s0VD6PoaBA==",
-        )
-        .unwrap();
+        let mut value = serde_json::to_value(submission).unwrap();
+        value["anchor"] = serde_json::json!({"wallet_account_id": "legacy"});
+        assert!(serde_json::from_value::<Submission>(value).is_err());
     }
 }

@@ -1,8 +1,7 @@
 # Current service policy
 
 The [November 4 concept](concept.md) defines the MVP. These decisions resolve its
-open questions for the current implementation. Earlier expansions are retained
-in [the historical decision log](archive/decision-history.md), not as requirements.
+open questions for the current implementation.
 
 ## Authorization and scope
 
@@ -14,8 +13,10 @@ human actually approved a response or that a respondent used the product.
 
 Create issue surveys only. Personal agents gather context or interview humans
 with their existing tools. Human-confirmed answers, agent observations and
-interpretations remain distinct in the report. Wallet anchoring, PR reviews,
-usage verification, prioritization and work orchestration are outside scope.
+interpretations remain distinct in the report. The output is a shared research
+report with findings, disagreements, open questions and proposed acceptance
+criteria. Respondents use local signing keys derived separately for each survey.
+Usage verification and prioritization are outside scope.
 
 ## Confidentiality and disclosure
 

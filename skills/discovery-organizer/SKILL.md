@@ -54,8 +54,8 @@ no private rejection reasons. Do not infer that no one had a problem.
 Help the maintainer understand affected workflows, consequences, disagreement,
 uncertainty and desired outcomes. Distinguish human-confirmed evidence, agent
 observations and interpretations. Counts do not establish importance or verified
-usage. Proposed criteria and tasks are suggestions for the maintainer's existing
-agent; they are not automatically applied or prioritized by this service.
+usage. Proposed acceptance criteria are suggestions for maintainer review;
+they are not automatically applied or prioritized by this service.
 
 Identify whether the report changes an acceptance criterion or corrects an
 assumption. Obtain the owner's authorization before editing the issue or taking

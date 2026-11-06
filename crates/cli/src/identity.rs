@@ -98,7 +98,6 @@ mod tests {
         let other = sign_submission(&home.0, response(2)).unwrap();
         assert_eq!(first.signer, edit.signer);
         assert_ne!(first.signer, other.signer);
-        assert!(first.anchor.is_none());
         first.verify().unwrap();
     }
 

@@ -25,8 +25,6 @@ pub struct SurveyDefinition {
 pub enum SurveyKind {
     /// Evidence about an issue: workflows, obstacles, outcomes.
     IssueSurvey,
-    /// Historical wire value, retained to read older reports and transactions.
-    ProductReview,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -59,9 +57,6 @@ impl SurveyDefinition {
     pub fn validate(&self) -> Result<()> {
         if self.version != DEFINITION_VERSION {
             return err(format!("unsupported definition version {}", self.version));
-        }
-        if self.kind != SurveyKind::IssueSurvey {
-            return err("this MVP creates issue surveys only");
         }
         if self.target.number == 0 {
             return err("target.number must be a positive issue number");
@@ -157,15 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn mvp_rejects_review_creation_but_preserves_historical_wire_values() {
+    fn unsupported_survey_kinds_and_zero_issue_numbers_are_rejected() {
         let mut d = sample();
-        d.kind = SurveyKind::ProductReview;
-        assert!(d.validate().is_err());
-        // Older transactions can still be decoded and hashed for verification.
-        let historical: SurveyDefinition =
-            serde_json::from_slice(&d.canonical_bytes().unwrap()).unwrap();
-        assert_eq!(historical.hash().unwrap(), d.hash().unwrap());
-        d.kind = SurveyKind::IssueSurvey;
+        let mut value = serde_json::to_value(&d).unwrap();
+        value["kind"] = serde_json::json!("product_review");
+        assert!(serde_json::from_value::<SurveyDefinition>(value).is_err());
         d.target.number = 0;
         assert!(d.validate().is_err());
     }

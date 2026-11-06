@@ -110,11 +110,6 @@ pub fn submit<P: Platform>(p: &P, survey_id: &str, envelope_b64: &str) -> Result
     // enclave through OutLayer's front end, so they never echo it.
     let submission: Submission =
         serde_json::from_slice(&plaintext).map_err(|_| rejected("the submission is malformed"))?;
-    if submission.anchor.is_some() {
-        return Err(rejected(
-            "wallet anchoring is not supported by this release",
-        ));
-    }
     let identity = submission
         .verify()
         .map_err(|_| rejected("the signature does not verify"))?;

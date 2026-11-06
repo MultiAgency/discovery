@@ -3,7 +3,7 @@ reads announcements and invokes the CLI.
 
   surveys.py definition <comment.md>  -> prints the ```json block of a /survey comment
   surveys.py release                  -> prints KEY=VALUE lines for the surveys release
-  surveys.py due <repo>               -> JSON pending surveys, including PRs and closed issues
+  surveys.py due <repo>               -> JSON pending issue surveys, including closed issues
   surveys.py finalize <repo> <due.json> -> finalize and post each survey on its original release
 """
 import datetime
@@ -34,6 +34,8 @@ def release():
     if len(entries) != 1:
         sys.exit("releases.json needs exactly one entry with \"use\": \"surveys\"")
     e = entries[0]
+    if e.get("legacy_format"):
+        sys.exit("the active release uses an unsupported historical report format")
     for key, field in [("NETWORK", "network"), ("PROJECT", "project"), ("RELEASE", "release"), ("ORGANIZER", "organizer")]:
         print(f"DISCOVERY_{key}={e[field]}")
 
@@ -69,13 +71,15 @@ def trusted_release(fields, entries):
 
 
 def pages(endpoint):
-    # The issues REST endpoint includes pull requests and closed issues.
+    # The REST endpoint includes pull requests; pending() excludes them.
     return [item for page in gh("api", "--paginate", "--slurp", endpoint) for item in page]
 
 
 def pending(repo, entries, now):
     result, seen = [], set()
     for issue in pages(f"repos/{repo}/issues?state=all&per_page=100"):
+        if "pull_request" in issue:
+            continue
         n = issue["number"]
         comments = pages(f"repos/{repo}/issues/{n}/comments?per_page=100")
         # Public comments are untrusted: only our Actions' announcements and
@@ -94,7 +98,7 @@ def pending(repo, entries, now):
                 fields = dict(line.split(": ", 1) for line in block.strip().splitlines() if ": " in line)
                 survey, deadline = fields.get("survey", ""), fields.get("deadline", "")
                 pinned = trusted_release(fields, entries)
-                if not pinned or not re.fullmatch(r"[0-9a-f]{64}", survey):
+                if not pinned or pinned.get("legacy_format") or not re.fullmatch(r"[0-9a-f]{64}", survey):
                     continue
                 try:
                     due_at = datetime.datetime.fromisoformat(deadline.replace("Z", "+00:00"))
@@ -121,7 +125,7 @@ def finalize(repo, path):
     for item in json.loads(Path(path).read_text()):
         try:
             pinned = trusted_release(item, entries)
-            if not pinned or not re.fullmatch(r"[0-9a-f]{64}", item["survey"]):
+            if not pinned or pinned.get("legacy_format") or not re.fullmatch(r"[0-9a-f]{64}", item["survey"]):
                 raise ValueError("pending survey is not on a trusted release")
             number = int(item["number"])
             if number <= 0:

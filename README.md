@@ -30,9 +30,8 @@ and follow the live activation steps once the confidential release is approved.
 5. The maintainer's existing agent interprets the report alongside other evidence.
    Success means changing an acceptance criterion or correcting an assumption.
 
-There is no wallet setup for respondents. PR-review creation, a hosted
-interviewer, frontend, prioritization engine, usage verification and automatic
-coding/task/board orchestration are outside this MVP.
+Respondents use per-survey local signing keys. A hosted interviewer, frontend,
+prioritization engine and usage verification are outside this MVP.
 
 ## Build and check locally
 
@@ -96,7 +95,7 @@ anonymity: distinctive stories and public timing can still identify someone.
 | `.github` | Issue announcements, scheduled report posting and automated checks |
 | `skills` | Existing agents' organizer and respondent workflows |
 
-[Research](research/) and [archived expansions](docs/archive/) explain earlier
-designs. They do not expand the current product specification. Historical report
-fields remain readable, including older product reviews; new surveys are issue
-surveys only. Existing locked surveys continue on their original code.
+[Research](research/) records implementation research, not additional product
+requirements. The current protocol contains issue surveys and shared research
+reports only. Existing locked deployments remain unchanged; use a compatible
+earlier CLI for their older report formats, as described in [releases](docs/releases.md).

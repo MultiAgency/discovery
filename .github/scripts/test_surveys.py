@@ -48,12 +48,25 @@ class SurveysTests(unittest.TestCase):
         with patch.object(surveys, "pages", side_effect=pages):
             return surveys.pending("o/r", entries or [OLD, NEW], NOW)
 
-    def test_closed_issues_and_prs_keep_original_release(self):
+    def test_closed_issues_keep_original_release_and_prs_are_ignored(self):
         result = self.pending(
             [{"number": 1, "state": "closed"}, {"number": 2, "pull_request": {"url": "pr"}}],
             {1: [comment(announcement())], 2: [comment(announcement(NEW, "b" * 64))]})
-        self.assertEqual([r["number"] for r in result], [1, 2])
-        self.assertEqual([r["project"] for r in result], [OLD["project"], NEW["project"]])
+        self.assertEqual([r["number"] for r in result], [1])
+        self.assertEqual([r["project"] for r in result], [OLD["project"]])
+
+    def test_legacy_report_formats_are_not_scheduled_or_finalized(self):
+        legacy = {**OLD, "legacy_format": True}
+        self.assertEqual(self.pending([{"number": 1}], {1: [comment(announcement())]}, [legacy]), [])
+        item = {"number": 1, "survey": SURVEY, **legacy}
+        def read(path):
+            return json.dumps({"releases": [legacy]} if str(path) == "releases.json" else [item])
+        with patch.object(surveys.Path, "read_text", autospec=True, side_effect=read), \
+                patch.object(surveys.subprocess, "run") as run, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                surveys.finalize("o/r", "due.json")
+            run.assert_not_called()
 
     def test_forged_announcements_and_report_markers_are_ignored(self):
         result = self.pending([{"number": 1}], {1: [
@@ -102,6 +115,12 @@ class SurveysTests(unittest.TestCase):
     def test_creation_without_an_active_release_does_not_fall_back_to_history(self):
         with patch.object(surveys.Path, "read_text", return_value=json.dumps({"releases": [OLD]})):
             with self.assertRaisesRegex(SystemExit, "exactly one entry"):
+                surveys.release()
+
+    def test_creation_rejects_an_active_legacy_format_release(self):
+        entry = {**NEW, "legacy_format": True}
+        with patch.object(surveys.Path, "read_text", return_value=json.dumps({"releases": [entry]})):
+            with self.assertRaisesRegex(SystemExit, "unsupported historical"):
                 surveys.release()
 
     def test_finalizer_rejects_unknown_release_before_running_commands(self):

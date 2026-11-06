@@ -202,9 +202,9 @@ mod tests {
     fn output() -> Value {
         json!({ "survey_id": "survey", "kind": "issue_survey", "title": "t",
             "target": { "repo": "owner/repo", "number": 1 }, "status": "released",
-            "counts": { "responses": 0, "merged": 0, "anchored": 0 },
+            "counts": { "responses": 0, "merged": 0 },
             "body": { "summary": "No responses.", "findings": [], "disagreements": [],
-                "open_questions": [], "acceptance_criteria": [], "suggested_tasks": [] },
+                "open_questions": [], "acceptance_criteria": [] },
             "model": "model", "limits": [] })
     }
 
