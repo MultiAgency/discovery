@@ -31,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
@@ -72,6 +73,11 @@ jobs:
             cat /tmp/discovery-demo/walkthrough.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/setup-near
+        if: inputs.mode == 'live'
+      - name: Build the organizer CLI without credentials
+        if: inputs.mode == 'live'
+        run: cargo build --release --locked -p discovery-cli
       - name: Create the live confidential survey and publish its announcement
         if: inputs.mode == 'live'
         env:
@@ -81,7 +87,6 @@ jobs:
           set -euo pipefail
           [ -n "$DISCOVERY_ORGANIZER_KEY" ] || { echo 'Missing DISCOVERY_ORGANIZER_KEY repository secret'; exit 1; }
           [ -n "$DISCOVERY_PAYMENT_KEY" ] || { echo 'Missing DISCOVERY_PAYMENT_KEY repository secret'; exit 1; }
-          cargo build --release --locked -p discovery-cli
           set -a
           eval "$(python3 .github/scripts/surveys.py release)"
           set +a
@@ -98,4 +103,13 @@ jobs:
             /tmp/discovery-demo/definition.json
             /tmp/discovery-demo/request.md
             /tmp/discovery-demo/walkthrough.txt
+          if-no-files-found: ignore
+
+      - name: Retain uncertain signed transaction for reconciliation
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-transaction-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/discovery-signing/**/signed.json
+          retention-days: 7
           if-no-files-found: ignore

@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       issues: write
     env:
       GH_TOKEN: ${{ github.token }}
@@ -31,6 +32,9 @@ jobs:
             ~/.cargo/registry
             target
           key: cli-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - uses: ./.github/actions/setup-near
+      - name: Build the CLI without organizer credentials
+        run: cargo build --release --locked -p discovery-cli
       - name: Finalize and post reports
         env:
           DISCOVERY_ORGANIZER_KEY: ${{ secrets.DISCOVERY_ORGANIZER_KEY }}
@@ -38,5 +42,13 @@ jobs:
         run: |
           pending=$(python3 -c 'import json; from pathlib import Path; print(len(json.loads(Path("due.json").read_text())))')
           [ "$pending" -gt 0 ] || { echo "nothing due"; exit 0; }
-          cargo build --release --locked -p discovery-cli
           python3 .github/scripts/surveys.py finalize "$REPO" due.json
+
+      - name: Retain uncertain signed transaction for reconciliation
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-transaction-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/discovery-signing/**/signed.json
+          retention-days: 7
+          if-no-files-found: ignore

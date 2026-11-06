@@ -3,6 +3,7 @@ reads announcements and invokes the CLI.
 
   surveys.py definition <comment.md>  -> prints the ```json block of a /survey comment
   surveys.py release                  -> prints KEY=VALUE lines for the surveys release
+  surveys.py reconciled <repo>        -> refuse new calls while trusted recovery artifacts exist
   surveys.py due <repo>               -> JSON pending issue surveys, including closed issues
   surveys.py finalize <repo> <due.json> -> finalize and post each survey on its original release
 """
@@ -27,6 +28,24 @@ def definition(path):
     if len(found) != 1:
         sys.exit("a /survey comment needs exactly one ```json block with the survey definition")
     print(found[0])
+
+
+def reconciled(repo):
+    """Do not start another paid organizer call while recovery is outstanding."""
+    for page in gh("api", "--paginate", "--slurp", f"repos/{repo}/actions/artifacts?per_page=100"):
+        for artifact in page.get("artifacts", []):
+            if not artifact.get("name", "").startswith("signed-transaction-") or artifact.get("expired", True):
+                continue
+            run_id = (artifact.get("workflow_run") or {}).get("id")
+            if not isinstance(run_id, int):
+                continue
+            run = gh("api", f"repos/{repo}/actions/runs/{run_id}")
+            # An untrusted PR may upload artifacts too. Only our organizer
+            # workflows and their privileged trigger types can stop spending.
+            if (run.get("path") in {".github/workflows/survey.yml", ".github/workflows/finalize.yml", ".github/workflows/demo.yml"}
+                    and run.get("event") in {"issue_comment", "schedule", "workflow_dispatch"}
+                    and (run.get("head_repository") or {}).get("full_name", "").lower() == repo.lower()):
+                sys.exit("An uncertain organizer transaction needs reconciliation. Download its signed-transaction artifact, query the same transaction, then remove the artifact before starting another paid call.")
 
 
 def release():
@@ -147,7 +166,7 @@ def finalize(repo, path):
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else ""
-    {"definition": lambda: definition(sys.argv[2]), "release": release, "due": lambda: due(sys.argv[2]),
+    {"definition": lambda: definition(sys.argv[2]), "reconciled": lambda: reconciled(sys.argv[2]), "release": release, "due": lambda: due(sys.argv[2]),
      "finalize": lambda: finalize(sys.argv[2], sys.argv[3])}.get(
         command, lambda: sys.exit(__doc__)
     )()

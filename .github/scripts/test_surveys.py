@@ -104,6 +104,18 @@ class SurveysTests(unittest.TestCase):
             self.assertEqual(surveys.pages("endpoint"), [{"number": 1}, {"number": 2}])
             gh.assert_called_once_with("api", "--paginate", "--slurp", "endpoint")
 
+    def test_unexpired_signed_recovery_blocks_only_trusted_organizer_runs(self):
+        pages = [{"artifacts": [{"name": "signed-transaction-123", "expired": False, "workflow_run": {"id": 123}}]}]
+        trusted = {"path": ".github/workflows/finalize.yml", "event": "schedule", "head_repository": {"full_name": "o/r"}}
+        with patch.object(surveys, "gh", side_effect=[pages, trusted]):
+            with self.assertRaisesRegex(SystemExit, "needs reconciliation"):
+                surveys.reconciled("o/r")
+        for run in [{**trusted, "event": "pull_request"}, {**trusted, "head_repository": {"full_name": "attacker/fork"}}, {**trusted, "path": ".github/workflows/checks.yml"}]:
+            with patch.object(surveys, "gh", side_effect=[pages, run]):
+                surveys.reconciled("o/r")
+        with patch.object(surveys, "gh", return_value=[{"artifacts": [{"name": "signed-transaction-old", "expired": True}, {"name": "demo", "expired": False}]}]):
+            surveys.reconciled("o/r")
+
     def test_creation_default_ignores_historical_entries_without_use(self):
         with patch.object(surveys.Path, "read_text", return_value=json.dumps({"releases": [OLD, NEW]})):
             out = io.StringIO()

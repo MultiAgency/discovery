@@ -18,6 +18,12 @@ report with findings, disagreements, open questions and proposed acceptance
 criteria. Respondents use local signing keys derived separately for each survey.
 Usage verification and prioritization are outside scope.
 
+Our service agent uses a funded NEAR account, signed locally through the
+official NEAR CLI, and owns the shared submission payment key. Its private key
+stays in our keychain, key file or CI secret. Respondents receive only the
+restricted submission key, not the organizer key. The service account remains
+separate from the locked release owner. Custody wallets are not required.
+
 ## Confidentiality and disclosure
 
 Only the report is released; no operation returns individual responses. The

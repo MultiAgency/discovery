@@ -6,6 +6,7 @@
 
 mod identity;
 mod near;
+mod signing;
 mod verify;
 
 use std::fs;
@@ -126,6 +127,9 @@ enum Organizer {
         /// Write the announcement comment (Markdown) to this file.
         #[arg(long)]
         announcement: Option<PathBuf>,
+        /// Query a previously signed transaction after an uncertain submission.
+        #[arg(long)]
+        resume_signed: Option<PathBuf>,
     },
     /// Finalize a survey after its deadline.
     Finalize {
@@ -136,6 +140,9 @@ enum Organizer {
         /// Write the report comment (Markdown, with provenance) to this file.
         #[arg(long)]
         comment: Option<PathBuf>,
+        /// Query a previously signed transaction after an uncertain submission.
+        #[arg(long)]
+        resume_signed: Option<PathBuf>,
     },
 }
 
@@ -250,45 +257,50 @@ impl ReleaseArgs {
         Ok(s)
     }
 
-    /// On-chain run as the organizer account, pinned to the release.
+    /// On-chain run, signed locally by the official NEAR CLI.
     fn execute(
         &self,
         input: Value,
         secrets_profile: Option<&str>,
         max_seconds: u64,
         deposit_yocto: u128,
+        resume: Option<&std::path::Path>,
     ) -> Result<(Value, String)> {
-        let signer = near::Signer::load(&self.network, &self.organizer)?;
+        signing::check_payment_owner(&self.organizer, self.payment_key.as_deref())?;
         let mut args = json!({
-            "source": { "Project": { "project_id": self.project, "version_key": self.release } },
-            "input_data": serde_json::to_string(&input)?,
-            "resource_limits": { "max_instructions": 50_000_000_000u64, "max_memory_mb": 256, "max_execution_seconds": max_seconds },
-            "response_format": "Json",
+            "source":{"Project":{"project_id":self.project,"version_key":self.release}},
+            "input_data":serde_json::to_string(&input)?,
+            "resource_limits":{"max_instructions":50_000_000_000u64,"max_memory_mb":256,"max_execution_seconds":max_seconds},
+            "response_format":"Json",
         });
         if let Some(profile) = secrets_profile {
-            args["secrets_ref"] = json!({ "profile": profile, "account_id": self.organizer });
+            args["secrets_ref"] = json!({"profile":profile,"account_id":self.organizer});
         }
         let contract = self.contract_id()?;
-        let outcome = self.rpc()?.function_call(
-            &signer,
+        let rpc = self.rpc()?;
+        let project = rpc.view(
             &contract,
-            "request_execution",
-            &args,
-            300_000_000_000_000,
-            deposit_yocto,
+            "get_project",
+            json!({"project_id":self.project}),
+            None,
         )?;
-        let tx_hash = outcome["transaction"]["hash"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        if let Some((done, _)) = near::events(&outcome, &contract, "execution_completed").first() {
-            if done["success"] != true {
-                return Err(
-                    format!("execution failed (tx {tx_hash}): {}", done["error_message"]).into(),
-                );
-            }
+        if project["owner"] == self.organizer || project["owner"].as_str().is_none() {
+            return Err(
+                "the service organizer must be separate from the locked release owner".into(),
+            );
         }
-        Ok((module_output(near::success_value(&outcome)?)?, tx_hash))
+        let call = signing::call(&contract, &args, deposit_yocto);
+        let outcome = signing::execute(&rpc, &self.network, &self.organizer, &call, resume)?;
+        let hash = outcome["transaction"]["hash"]
+            .as_str()
+            .ok_or("transaction has no hash")?
+            .to_string();
+        eprintln!("Organizer transaction: {hash}");
+        let (actual_input, output, _) = verify::execution(&outcome, &self.pinned()?)?;
+        if actual_input != input {
+            return Err("execution input differs from the authorized survey operation".into());
+        }
+        Ok((module_output(output)?, hash))
     }
 }
 
@@ -450,6 +462,7 @@ fn main() -> Result<()> {
             definition,
             target,
             announcement,
+            resume_signed,
         }) => {
             let definition: SurveyDefinition = serde_json::from_slice(&fs::read(&definition)?)?;
             definition.validate()?;
@@ -462,6 +475,7 @@ fn main() -> Result<()> {
                 None,
                 60,
                 100_000_000_000_000_000_000_000,
+                resume_signed.as_deref(),
             )?;
             let survey_id = output["survey_id"]
                 .as_str()
@@ -477,12 +491,14 @@ fn main() -> Result<()> {
             survey_id,
             secrets_profile,
             comment,
+            resume_signed,
         }) => {
             let (output, tx) = r.execute(
                 json!({ "operation": "finalize", "survey_id": survey_id }),
                 Some(&secrets_profile),
                 180,
                 200_000_000_000_000_000_000_000,
+                resume_signed.as_deref(),
             )?;
             let report: Report = serde_json::from_value(output)?;
             if report.survey_id != survey_id {

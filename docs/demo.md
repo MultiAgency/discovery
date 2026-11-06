@@ -31,7 +31,8 @@ configuration; it illustrates the lifecycle, not actual findings about issue #1.
 
 The current source deliberately blocks live creation: no confidential model
 workload has been approved, no new active locked release is registered, and
-the repository's service credentials must be configured. Follow
+the repository's local organizer key (`DISCOVERY_ORGANIZER_KEY`) and shared
+submission key (`DISCOVERY_PAYMENT_KEY`) must be configured. Follow
 [workload approval](workload-approval.md) and [operations](operations.md).
 Do not bypass those gates or use the historical release to imply this source
 was verified.

@@ -65,7 +65,7 @@ pub fn survey_key(
 }
 
 /// Check contract execution provenance before trusting the returned bytes.
-fn execution(outcome: &Value, release: &Release) -> Result<(Value, Value, String)> {
+pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Value, String)> {
     let tx = &outcome["transaction"];
     if tx["signer_id"] != release.organizer.as_str()
         || tx["receiver_id"] != release.contract.as_str()

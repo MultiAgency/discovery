@@ -1,0 +1,23 @@
+name: Set up official NEAR CLI
+description: Install pinned local-signing tooling without configuring credentials.
+runs:
+  using: composite
+  steps:
+    - name: Check for unresolved organizer transactions
+      shell: bash
+      run: python3 .github/scripts/surveys.py reconciled "$GITHUB_REPOSITORY"
+    - uses: dtolnay/rust-toolchain@1.97.0
+    - uses: actions/cache@v4
+      id: near-cache
+      with:
+        path: ~/.cargo/bin/near
+        key: near-cli-rs-0.30.1-headless-${{ runner.os }}-${{ runner.arch }}
+    - name: Install near-cli-rs
+      if: steps.near-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install near-cli-rs --version 0.30.1 --locked --force --no-default-features
+    - name: Configure signed-transaction recovery directory
+      shell: bash
+      run: |
+        near --version
+        echo "DISCOVERY_SIGNED_DIR=$RUNNER_TEMP/discovery-signing" >> "$GITHUB_ENV"

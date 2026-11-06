@@ -32,7 +32,49 @@ see [releases](releases.md).
 OutLayer setup: https://skills.outlayer.ai/outlayer-cli/SKILL.md.
 The build must retain its manifest, egress policy and project-bound key path.
 Use the same organizer account for HTTPS payment keys and on-chain execution;
-changing the caller changes the storage/key namespace.
+changing the caller changes the storage/key namespace. The CLI checks payment-key
+ownership and verifies the exact signed call and OutLayer execution on chain.
+
+The organizer account must be separate from the release owner. Deploy with a
+separate temporary owner and remove its access keys after review. Local signing
+does not replace release locking or model workload approval.
+
+## Official CLI and local key
+
+Organizer commands require `near-cli-rs` 0.30.1, available as `near` on PATH:
+
+```bash
+cargo install near-cli-rs --version 0.30.1 --locked --no-default-features
+near --version
+```
+
+Choose one key source:
+
+- Locally, use the official CLI's legacy keychain at
+  `~/.near-credentials/<network>/<organizer>.json`.
+- Set `DISCOVERY_ORGANIZER_KEY_FILE` to a standard NEAR access-key JSON file.
+- In CI, provide `DISCOVERY_ORGANIZER_KEY` as a canonical `ed25519:<base58>`
+  64-byte NEAR keypair. Do not pass its value in command arguments or logs.
+
+The wrapper gives the official CLI the exact contract call through a private
+argument file and asks it to save a signed transaction. The CLI handles keys,
+nonces, encoding and signatures. No custom transaction encoder or signer is
+used. Temporary key copies have mode 0600 in a mode-0700 directory and are
+removed immediately after signing. Subprocess terminal output is not parsed or
+published. GitHub Actions cache only the installed CLI binary, never keys.
+
+Our RPC adapter submits the resulting signed bytes and polls those same bytes
+for final execution. It checks signer, receiver, sole action, method, arguments,
+gas, deposit and the pinned OutLayer execution before using its output.
+
+The official OutLayer CLI remains useful for deployment, secrets and payment-key
+setup. Its `run` command automatically chooses HTTPS when a payment key is
+configured; organizer execution uses the NEAR CLI to keep the on-chain path
+explicit and preserve trusted block time.
+
+References:
+- https://github.com/near/near-cli-rs
+- https://docs.near.org/api/rpc/transactions
 
 ## Configure the repository
 
@@ -40,14 +82,14 @@ Set these repository secrets without printing their contents:
 
 | Secret | Purpose |
 | --- | --- |
-| `DISCOVERY_ORGANIZER_KEY` | Organizer's NEAR signing key for creation and finalization |
+| `DISCOVERY_ORGANIZER_KEY` | Service account's NEAR keypair for local creation/finalization signing |
 | `DISCOVERY_PAYMENT_KEY` | Shared submission key owned by that organizer |
 
 The payment key is intentionally published in announcements. Restrict it to the
 release project with a small per-call spending cap and monitor its balance.
-Keep organizer credentials, payment keys and `nearai` profiles available for
-older pending surveys. The workflows support historical releases with the same
-organizer key; a different organizer requires separately configured credentials.
+Keep the service account funded for execution deposits and gas. The restricted
+submission key remains owned by that account. Historical report formats require
+the earlier CLI; keep their original credentials available until they finish.
 
 ## Request and publish
 
@@ -70,7 +112,7 @@ findings and decides whether to refine the existing issue's requirements.
 
 With the release's `DISCOVERY_NETWORK`, `DISCOVERY_PROJECT`, `DISCOVERY_RELEASE`,
 `DISCOVERY_ORGANIZER` and `DISCOVERY_PAYMENT_KEY` configured, plus the organizer
-signing key for organizer commands:
+local organizer key configured through one of the sources above:
 
 ```bash
 discovery organizer create definition.json --target owner/repo#42 --announcement announcement.md
@@ -95,9 +137,33 @@ Retry the same command after interrupted freezing or cleanup. Do not delete
 empty sealed markers or registration records: they fence delayed writers.
 
 A withheld report is a successful privacy outcome, with no private reasons.
-Network/model errors are incomplete runs and require retry; they do not cause
-response contents to expire independently. Check a timed-out NEAR transaction
-before resubmitting to avoid an unnecessary charged execution.
+Network/model errors are incomplete runs and require reconciliation or retry;
+response contents do not expire independently. There is no custody API or wallet
+request-status layer in organizer execution.
+
+If submission is uncertain, the CLI retains the signed JSON and prints its path.
+Use the same operation, definition/profile and pinned release settings with
+`--resume-signed <path>` to query that exact transaction, without signing or
+broadcasting a replacement:
+
+```bash
+discovery organizer finalize <survey> --resume-signed /private/path/signed.json --comment report.md
+```
+
+Actions retain only uncertain `signed.json` files as a seven-day recovery artifact;
+they never upload private-key files. New paid Actions are blocked while an
+unexpired recovery artifact exists. Download it and reconcile the transaction
+promptly, then remove the artifact to unblock automation. Local commands need
+the same reconciliation before starting another paid attempt. Signed artifacts authorize an already approved public organizer call;
+handle them as operational recovery material. Successful calls erase the local
+artifact automatically. A resumed artifact remains until the operator removes
+it after reconciliation.
+
+If the transaction was never accepted, inspect it before rebroadcasting those
+same signed bytes using the official CLI. Do not rerun creation/finalization
+with a new signature merely because a response timed out. Known final execution
+failures can be investigated by their printed transaction hash before deciding
+whether a new paid attempt is appropriate.
 
 Before claiming the demo complete, run the complete Actions/CLI path on testnet
 with synthetic identifiers. Check report provenance, absent identifying details,

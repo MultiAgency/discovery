@@ -30,8 +30,16 @@ and follow the live activation steps once the confidential release is approved.
 5. The maintainer's existing agent interprets the report alongside other evidence.
    Success means changing an acceptance criterion or correcting an assumption.
 
-Respondents use per-survey local signing keys. A hosted interviewer, frontend,
+Our service agent uses a funded NEAR account and the official NEAR CLI for
+local signing. Respondents use per-survey local signing keys and our shared
+submission payment key, with no individual wallets required. The release owner
+remains a separate locked account. A hosted interviewer, frontend,
 prioritization engine and usage verification are outside this MVP.
+
+Organizer commands additionally need `near-cli-rs` 0.30.1 (`near --version`)
+and access to the service account's key. Respondent commands and offline tests
+do not need the NEAR CLI. GitHub Actions install the pinned tool automatically;
+see [operations](docs/operations.md) for credentials and transaction recovery.
 
 ## Build and check locally
 
