@@ -3,8 +3,8 @@
 The demo belongs in this repository. Its first research topic is
 [issue #1: Joining a survey takes too many manual steps](https://github.com/MultiAgency/discovery/issues/1).
 The service should improve its own requirements using evidence from people and
-agents trying to contribute. It does not build a new interviewer or automatically
-implement the resulting suggestions.
+agents trying to contribute. The demo ends with a shared report and a
+maintainer-reviewed refinement to the existing issue's requirements.
 
 ## Try the protocol now
 

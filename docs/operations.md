@@ -61,8 +61,8 @@ terminal provenance footer completes a survey; report prose never controls
 scheduling. Failed surveys are retried on the next run.
 
 The report posts automatically, as requested when the maintainer creates the
-survey. Follow-up changes to requirements or code belong to the maintainer's
-existing agent and its approval process.
+survey. The service ends at the shared report. The maintainer reviews its
+findings and decides whether to refine the existing issue's requirements.
 
 ## Manual CLI path
 

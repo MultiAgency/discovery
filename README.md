@@ -11,7 +11,8 @@ The service does not create an issue for each response. The maintainer's agent
 uses the report to propose refinements to the existing issue's requirements.
 
 [The original November 4 concept](docs/concept.md) is the product specification.
-Existing agents supply text or voice interaction and any subsequent coding work.
+Existing agents supply the text or voice interaction for preparing responses
+and interpreting reports.
 
 ## Use the MVP
 
