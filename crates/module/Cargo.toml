@@ -1,0 +1,27 @@
+[package]
+name = "discovery-module"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "OutLayer WASI module: InitSurvey, Submit, Status, Finalize"
+
+[[bin]]
+name = "discovery-module"
+path = "src/main.rs"
+
+[features]
+# Put rejection reasons in withheld reports. Dev project and synthetic data
+# only: a diagnostics build can never be a pinned release.
+diagnostics = []
+
+[dependencies]
+discovery-protocol.workspace = true
+outlayer.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+base64.workspace = true
+anyhow = "1"
+discovery-nearai.workspace = true
+getrandom.workspace = true

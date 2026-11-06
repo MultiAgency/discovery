@@ -1,0 +1,55 @@
+# Creates a confidential survey when a collaborator comments `/survey` on an
+# existing issue with a definition in a ```json block, then posts the
+# announcement. See skills/discovery-organizer and docs/decisions.md D12.
+name: survey
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  create:
+    if: >-
+      startsWith(github.event.comment.body, '/survey')
+      && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+      && !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    concurrency:
+      group: survey-${{ github.event.issue.number }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUMBER: ${{ github.event.issue.number }}
+      COMMENT: ${{ github.event.comment.body }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cli-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Build the CLI
+        run: cargo build --release --locked -p discovery-cli
+      - name: Create the survey
+        env:
+          DISCOVERY_ORGANIZER_KEY: ${{ secrets.DISCOVERY_ORGANIZER_KEY }}
+          DISCOVERY_PAYMENT_KEY: ${{ secrets.DISCOVERY_PAYMENT_KEY }}
+        run: |
+          printf '%s' "$COMMENT" > comment.md
+          {
+            python3 .github/scripts/surveys.py definition comment.md > definition.json
+            set -a; eval "$(python3 .github/scripts/surveys.py release)"; set +a
+            target/release/discovery organizer create definition.json \
+              --target "$REPO#$NUMBER" --announcement announcement.md
+          } 2> error.txt
+          gh issue comment "$NUMBER" --repo "$REPO" --body-file announcement.md
+      - name: Report a failure
+        if: failure()
+        run: |
+          { echo "The survey was not created."; echo; echo '```'; tail -n 20 error.txt 2>/dev/null || true; echo '```'; } > failure.md
+          gh issue comment "$NUMBER" --repo "$REPO" --body-file failure.md

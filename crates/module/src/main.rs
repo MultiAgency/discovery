@@ -1,0 +1,72 @@
+//! OutLayer WASI module for confidential surveys.
+//!
+//! Input: `{"operation": "init_survey" | "submit" | "status" | "finalize" | "receipt", ...}`.
+//! Output: the operation's result, or `{"error": "..."}`.
+
+mod checks;
+mod collection;
+mod confidential;
+mod finalize;
+mod host;
+mod merge;
+mod platform;
+mod survey;
+mod workload;
+
+use discovery_protocol::definition::SurveyDefinition;
+use discovery_protocol::Result;
+use outlayer::env;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+// The manifest lives in the `outlayer.manifest` custom section, covered by the
+// wasm's sha256.
+#[cfg(target_arch = "wasm32")]
+#[used]
+#[link_section = "outlayer.manifest"]
+static OUTLAYER_MANIFEST: [u8; include_bytes!("../manifest.json").len()] =
+    *include_bytes!("../manifest.json");
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum Input {
+    InitSurvey { definition: SurveyDefinition },
+    Submit { survey_id: String, envelope: String },
+    Status { survey_id: String },
+    Finalize { survey_id: String },
+    Receipt { survey_id: String },
+}
+
+fn run() -> Result<Value> {
+    let input: Input =
+        env::input_json()?.ok_or_else(|| discovery_protocol::Error("no input".into()))?;
+    let p = host::Host;
+    Ok(match input {
+        Input::InitSurvey { definition } => {
+            // An immutable release with no approved inference workload must
+            // not create surveys that it could never safely finalize.
+            workload::Policy::release(confidential::MODEL)?;
+            serde_json::to_value(survey::init(&p, definition)?)?
+        }
+        Input::Submit {
+            survey_id,
+            envelope,
+        } => serde_json::to_value(survey::submit(&p, &survey_id, &envelope)?)?,
+        Input::Status { survey_id } => serde_json::to_value(survey::status(&p, &survey_id)?)?,
+        Input::Finalize { survey_id } => finalize_run(&p, &survey_id)?,
+        Input::Receipt { survey_id } => Value::String(survey::receipt(&p, &survey_id)?),
+    })
+}
+
+fn finalize_run(p: &host::Host, survey_id: &str) -> Result<Value> {
+    Ok(serde_json::to_value(finalize::finalize(
+        p,
+        &confidential::Confidential::new(),
+        survey_id,
+    )?)?)
+}
+
+fn main() {
+    let answer = run().unwrap_or_else(|e| json!({ "error": e.0 }));
+    env::output_json(&answer).expect("serialize output");
+}

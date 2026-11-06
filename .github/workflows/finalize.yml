@@ -1,0 +1,43 @@
+# Finalizes surveys past their deadline and posts each report with its
+# provenance line. The module releases one report per survey; retries may run
+# inference more than once. This workflow only decides when to invoke it.
+name: finalize
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: finalize
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find surveys past their deadline
+        run: python3 .github/scripts/surveys.py due "$REPO" > due.json && cat due.json
+      - uses: actions/cache@v4
+        if: hashFiles('due.json') != ''
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cli-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Finalize and post reports
+        env:
+          DISCOVERY_ORGANIZER_KEY: ${{ secrets.DISCOVERY_ORGANIZER_KEY }}
+          DISCOVERY_PAYMENT_KEY: ${{ secrets.DISCOVERY_PAYMENT_KEY }}
+        run: |
+          pending=$(python3 -c 'import json; from pathlib import Path; print(len(json.loads(Path("due.json").read_text())))')
+          [ "$pending" -gt 0 ] || { echo "nothing due"; exit 0; }
+          cargo build --release --locked -p discovery-cli
+          python3 .github/scripts/surveys.py finalize "$REPO" due.json

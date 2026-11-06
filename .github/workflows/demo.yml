@@ -1,0 +1,101 @@
+name: own-repo demo
+run-name: Own-repo demo — ${{ inputs.mode }} on issue ${{ inputs.issue_number }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Walkthrough is synthetic; live creates a paid confidential survey only after release approval.
+        type: choice
+        options: [walkthrough, live]
+        default: walkthrough
+      issue_number:
+        description: Existing issue to enrich in this repository
+        type: string
+        default: '1'
+      collection_hours:
+        description: Live collection window in hours
+        type: choice
+        options: ['1', '24', '72']
+        default: '24'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: survey-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUMBER: ${{ inputs.issue_number }}
+      HOURS: ${{ inputs.collection_hours }}
+      DEMO_MODE: ${{ inputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare the self-survey and check live readiness
+        run: |
+          set -euo pipefail
+          [[ "$NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'Choose a positive issue number'; exit 1; }
+          gh api "repos/$REPO/issues/$NUMBER" > /tmp/demo-target.json
+          python3 -c 'import json; d=json.load(open("/tmp/demo-target.json")); assert "pull_request" not in d, "Choose an issue, not a pull request"'
+          extra=()
+          if [ "$DEMO_MODE" = live ]; then extra+=(--require-live); fi
+          python3 .github/scripts/prepare_demo.py --repo "$REPO" --issue "$NUMBER" --hours "$HOURS" --out /tmp/discovery-demo "${extra[@]}"
+      - name: Explain readiness
+        if: always()
+        run: |
+          if [ -f /tmp/discovery-demo/status.md ]; then cat /tmp/discovery-demo/status.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cli-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Exercise the request-to-report protocol with synthetic data
+        if: inputs.mode == 'walkthrough'
+        run: |
+          set -euo pipefail
+          cargo test --locked -p discovery-module finalize::tests::request_to_report_demo -- --exact --nocapture > /tmp/discovery-demo/walkthrough.txt
+          {
+            echo
+            echo '## Synthetic local acceptance walkthrough — not live findings'
+            echo
+            echo '```text'
+            cat /tmp/discovery-demo/walkthrough.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Create the live confidential survey and publish its announcement
+        if: inputs.mode == 'live'
+        env:
+          DISCOVERY_ORGANIZER_KEY: ${{ secrets.DISCOVERY_ORGANIZER_KEY }}
+          DISCOVERY_PAYMENT_KEY: ${{ secrets.DISCOVERY_PAYMENT_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$DISCOVERY_ORGANIZER_KEY" ] || { echo 'Missing DISCOVERY_ORGANIZER_KEY repository secret'; exit 1; }
+          [ -n "$DISCOVERY_PAYMENT_KEY" ] || { echo 'Missing DISCOVERY_PAYMENT_KEY repository secret'; exit 1; }
+          cargo build --release --locked -p discovery-cli
+          set -a
+          eval "$(python3 .github/scripts/surveys.py release)"
+          set +a
+          target/release/discovery organizer create /tmp/discovery-demo/definition.json --target "$REPO#$NUMBER" --announcement /tmp/discovery-demo/announcement.md
+          gh issue comment "$NUMBER" --repo "$REPO" --body-file /tmp/discovery-demo/announcement.md
+          echo 'Live announcement posted. Respond through your agent and CLI; never upload answers to this workflow. The finalize workflow will publish the permitted report after the deadline.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Save public setup material and synthetic walkthrough
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: own-repo-demo-${{ github.run_id }}
+          path: |
+            /tmp/discovery-demo/status.md
+            /tmp/discovery-demo/definition.json
+            /tmp/discovery-demo/request.md
+            /tmp/discovery-demo/walkthrough.txt
+          if-no-files-found: ignore

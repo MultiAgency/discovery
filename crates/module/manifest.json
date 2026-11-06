@@ -1,0 +1,12 @@
+{
+  "encryption_keys": [
+    {"path": "survey"}
+  ],
+  "capabilities": {
+    "network": [
+      {"host": "cloud-api.near.ai", "timeout_secs": 120},
+      "pccs.phala.network",
+      "nras.attestation.nvidia.com"
+    ]
+  }
+}
