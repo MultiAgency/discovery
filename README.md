@@ -13,7 +13,6 @@ Existing agents supply text or voice interaction and any subsequent coding work.
 **Start with [Discovery's own-repo demo](docs/demo.md).** Research the onboarding
 friction in issue #1, run the synthetic request-to-report walkthrough in Actions,
 and follow the live activation steps once the confidential release is approved.
-The web contributor board is a separate interaction sketch, not this MVP.
 
 1. A maintainer uses the [organizer skill](skills/discovery-organizer/SKILL.md)
    to prepare and approve an issue survey, then posts `/survey` with its definition.
