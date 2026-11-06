@@ -114,10 +114,11 @@ printf 'Seen on qa-runner-3.internal.example.invalid.\n' > "$report"
 expect "a fixture identifier fails" fails check_public "$report"
 # The count phrases the module's tests use (crates/module/src/checks.rs).
 phrases="$repo/scripts/synthetic/count-phrases.json"
-while IFS= read -r counted; do
-  printf '%s\n' "$counted" > "$report"
-  expect "a respondent count fails: $counted" fails check_public "$report"
-done < <(jq -r '.counted[]' "$phrases")
+# By index, so a phrase containing a line break stays one report.
+for (( i = 0; i < $(jq '.counted | length' "$phrases"); i++ )); do
+  jq -r ".counted[$i]" "$phrases" > "$report"
+  expect "a respondent count fails: $(jq -c ".counted[$i]" "$phrases")" fails check_public "$report"
+done
 while IFS= read -r uncounted; do
   printf '%s\n' "$uncounted" > "$report"
   expect "no respondent count passes: $uncounted" succeeds check_public "$report"
