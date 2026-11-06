@@ -5,6 +5,11 @@ The CLI is GitHub-independent; Actions publish announcements and reports on
 existing issues. A maintainer needs only repository write access, not model or
 wallet credentials.
 
+The integration posts survey announcements and shared reports as comments on
+the survey's existing target issue. It does not publish individual responses or
+turn them into new issues. Any later issue creation is a separate decision by
+the maintainer, outside the survey service.
+
 ## Prepare a release
 
 The current embedded workload policy is empty. Do not collect responses with
