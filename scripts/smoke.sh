@@ -19,7 +19,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SYNTHETIC="$REPO/scripts/synthetic"
+FIXTURES="$REPO/fixtures"
 RELEASES="${RELEASES:-$REPO/releases.json}"
 WORK="${DISCOVERY_SMOKE_DIR:-$HOME/.discovery-smoke}"
 TARGET="${DISCOVERY_SMOKE_TARGET:-MultiAgency/discovery#1}"
@@ -207,7 +207,7 @@ prepare_init() {
   # jq would round a nanosecond timestamp through a double, so substitute it as text.
   jq --arg t "$3" --arg target "$TARGET" '.title = $t
       | .target = {repo: ($target | split("#")[0]), number: ($target | split("#")[1] | tonumber)}' \
-    "$SYNTHETIC/definition.json" |
+    "$FIXTURES/definition.json" |
     sed "s/\"deadline_ns\": 0,/\"deadline_ns\": ${deadline}000000000,/" > "$dir/definition.json"
   grep -q "\"deadline_ns\": ${deadline}000000000," "$dir/definition.json" || die "failed to set deadline_ns"
   discovery --target "$TARGET" prepare init "$dir/definition.json" \
@@ -313,7 +313,7 @@ cmd_check() {
     "$dir/verify-closed.json" >/dev/null || die "not cleaned up: $(jq -c . "$dir/verify-closed.json")"
   ok "closed, key replaced, report stored"
   if out=$(discovery --target "$TARGET" submit "$survey" --init-tx "$(cat "$dir/init_tx")" \
-      "$SYNTHETIC/answers1.json" 2>&1); then
+      "$FIXTURES/answers1.json" 2>&1); then
     die "a submission after finalization was accepted"
   fi
   [[ "$out" == *"survey is closed"* ]] || die "unexpected refusal: $out"

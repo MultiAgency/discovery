@@ -16,7 +16,7 @@
       "question_id": "outcome",
       "basis": "confirmed",
       "disclosure": { "tier": "publishable" },
-      "text": "Setup should list every missing local setting before making any network call."
+      "text": "Setup should name the missing local setting before making any network call."
     }
   ]
 }

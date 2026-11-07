@@ -13,9 +13,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::checks::Prepared;
-use crate::collection;
+use crate::collection::{self, load_definition, report_key};
 use crate::platform::{Mode, Platform, Records};
-use crate::survey::{load_definition, report_key};
 
 pub trait Llm {
     fn model(&self) -> &str;
@@ -272,9 +271,9 @@ fn audit<L: Llm>(llm: &L, prepared: &Prepared, body: &Body) -> Result<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collection::{responses_prefix, secret_key};
     use crate::platform::memory::Memory;
     use crate::survey::fixtures::{created, response, send, DEADLINE};
-    use crate::survey::{responses_prefix, secret_key};
     use discovery_protocol::response::{Basis, Disclosure};
     use std::cell::RefCell;
 
@@ -573,10 +572,10 @@ mod tests {
         collection::assert_discarded(&late, &id);
     }
 
-    /// OutLayer failed runs on their 126th storage call, so every finalization
-    /// path at full capacity must stay within 100: stored responses, fresh and
-    /// with cleanup resumed after a crash; empty registrations; and every slot
-    /// racing a delayed writer while it is frozen.
+    /// These full-capacity paths meet the 100-call target: stored responses,
+    /// resumed cleanup, empty registrations and racing delayed writers. They
+    /// exclude close-CAS contention; the combined-contention test below records
+    /// that gap separately from the observed failure on storage call 126.
     #[test]
     fn full_capacity_finalization_stays_within_the_storage_call_budget() {
         const CALLS_PER_RUN: usize = 100;
@@ -890,7 +889,7 @@ mod tests {
 
         let synthetic = |name: &str| {
             std::fs::read_to_string(format!(
-                "{}/../../scripts/synthetic/{name}",
+                "{}/../../fixtures/{name}",
                 env!("CARGO_MANIFEST_DIR")
             ))
             .unwrap()
@@ -958,5 +957,88 @@ mod tests {
             }
         }
         println!("released {released}, withheld {withheld}, errors {errors} of {runs}");
+    }
+
+    /// Seven registrations can defeat the first seven close CAS attempts,
+    /// followed by all eighteen delayed writers winning their freeze races.
+    /// This records a current gap above the 100-call target, not a new budget
+    /// or evidence that the observed live failure on call 126 is a host limit.
+    #[test]
+    fn combined_close_contention_and_slot_races_reach_111_storage_calls() {
+        use std::cell::Cell;
+        use std::collections::BTreeMap;
+        use std::rc::Rc;
+
+        const CLOSE_CONFLICTS: usize = 7;
+        const TARGET_CALLS: usize = 100;
+        const OBSERVED_FAILURE_CALL: usize = 126;
+
+        let places = collection::REGISTRATIONS as usize;
+        let (m, c) = created();
+        let mut writes = BTreeMap::new();
+        for i in 0..places {
+            let slot = format!("{}admitted-{i}", responses_prefix(&c.survey_id));
+            let submission = response(
+                Basis::Observed,
+                Disclosure::Publishable,
+                &format!("Response {i}: setup failed before any local check."),
+            );
+            let open =
+                collection::seal_slot(&m, &slot, &collection::Slot::Open { submission }).unwrap();
+            writes.insert(slot.clone(), open);
+            if i < places - CLOSE_CONFLICTS {
+                collection::register(&m, &c.survey_id, &slot).unwrap();
+            }
+        }
+
+        let late = after_deadline(&m);
+        let mut competitor = late.view(late.mode);
+        // A different request shares storage, but its own calls do not count
+        // against this finalizer's per-run budget.
+        competitor.calls = Rc::new(Cell::new(0));
+        let conflicts = Cell::new(0);
+        let inserted = Cell::new(0);
+        let mut finalizing = late.view(late.mode);
+        finalizing.prefix = format!("s/{}/", c.survey_id);
+        finalizing.before_write = Box::new(|key| {
+            if key == crate::collection::collection_key(&c.survey_id)
+                && conflicts.get() < CLOSE_CONFLICTS
+            {
+                let i = places - CLOSE_CONFLICTS + conflicts.get();
+                let slot = format!("{}admitted-{i}", responses_prefix(&c.survey_id));
+                collection::register(&competitor, &c.survey_id, &slot).unwrap();
+                conflicts.set(conflicts.get() + 1);
+            }
+            if let Some(open) = writes.get(key) {
+                // Only the first attempt inserts: later cleanup must retain
+                // its empty fence, even if the delayed writer runs again.
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    late.store.borrow_mut().entry(key.into())
+                {
+                    entry.insert(open.clone());
+                    inserted.set(inserted.get() + 1);
+                }
+            }
+        });
+
+        let llm = Fake::new(vec![body("Setup fails before local checks.")]);
+        let report = finalize(&finalizing, &llm, &c.survey_id).unwrap();
+        // Capture the finalizer's count before verification reads add calls.
+        let calls = late.calls.get();
+        assert_eq!(conflicts.get(), CLOSE_CONFLICTS);
+        assert_eq!(inserted.get(), places);
+        assert!(competitor.calls.get() > 0);
+        assert_eq!(report.status, Status::Released);
+        let synthesis: Value =
+            serde_json::from_str(llm.calls.borrow()[0].strip_prefix("report:").unwrap()).unwrap();
+        assert_eq!(synthesis["respondents"].as_array().unwrap().len(), places);
+        collection::assert_discarded(&late, &c.survey_id);
+        println!(
+            "storage calls with {CLOSE_CONFLICTS} close-CAS conflicts and {places} slot races: \
+             {calls}; target {TARGET_CALLS}, observed live failure call {OBSERVED_FAILURE_CALL}"
+        );
+        assert_eq!(calls, 111);
+        assert!(calls > TARGET_CALLS);
+        assert!(calls < OBSERVED_FAILURE_CALL);
     }
 }

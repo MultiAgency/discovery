@@ -1,41 +1,14 @@
-//! InitSurvey, Submit and Status.
-//!
-//! Storage layout (raw records, every value sealed under the project key):
-//! - `s/{id}/def`: the canonical survey definition
-//! - `s/{id}/key`: X25519 secret, replaced with an empty marker after release
-//! - `s/{id}/collection`: admission state and the registration-list head, fixed at close
-//! - `s/{id}/report`: the released report
-//! - `s/{id}/r/{hex mac(id:response hash)}`: open response slot, later an empty fence
-//! - `s/{id}/i/{random}`: sealed registration metadata, no response content
-//!
-//! `{id}` is the hex definition hash, which is public. Response keys reveal
-//! nothing about who responded without the project key.
+//! InitSurvey, Submit and Status. Storage lives in [`crate::collection`].
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use discovery_protocol::definition::SurveyDefinition;
-use discovery_protocol::envelope::{SurveyKey, MAX_RESPONSE};
+use discovery_protocol::envelope::MAX_RESPONSE;
 use discovery_protocol::response::Response;
 use discovery_protocol::{Error, Result, SurveyStatus};
 use serde::Serialize;
 
-use crate::collection::{self, Slot};
+use crate::collection::{self, load_definition, load_key, report_key, secret_key};
 use crate::platform::{Mode, Platform, Records};
-
-pub fn def_key(id: &str) -> String {
-    format!("s/{id}/def")
-}
-pub fn secret_key(id: &str) -> String {
-    format!("s/{id}/key")
-}
-pub fn collection_key(id: &str) -> String {
-    format!("s/{id}/collection")
-}
-pub fn report_key(id: &str) -> String {
-    format!("s/{id}/report")
-}
-pub fn responses_prefix(id: &str) -> String {
-    format!("s/{id}/r/")
-}
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Created {
@@ -61,11 +34,7 @@ pub fn init<P: Platform>(p: &P, definition: SurveyDefinition) -> Result<Created>
         return Err(Error("deadline is in the past".into()));
     }
     let id = hex::encode(definition.hash()?);
-    let records = Records(p);
-    records.set_if_absent(&def_key(&id), &definition.canonical_bytes()?)?;
-    records.set_if_absent(&secret_key(&id), &SurveyKey::generate()?.to_bytes())?;
-    collection::init(p, &id)?;
-    let key = load_key(p, &id)?;
+    let key = collection::create(p, &id, &definition)?;
     Ok(Created {
         survey_id: id,
         public_key: hex::encode(key.public()),
@@ -93,39 +62,13 @@ pub fn submit<P: Platform>(p: &P, survey_id: &str, envelope_b64: &str) -> Result
     response
         .validate(&definition)
         .map_err(|_| rejected("the response does not match the survey"))?;
-    // Canonical content, not ciphertext: re-encryption on a CLI retry must not
-    // create another contribution. The keyed name prevents guessed-answer lookup.
-    let canonical = serde_json::to_vec(&response)?;
     // Omitted default fields can expand beyond the envelope's plaintext limit.
+    let canonical = serde_json::to_vec(&response)?;
     if canonical.len() > MAX_RESPONSE {
         return Err(rejected("the response is too large"));
     }
-    let digest = discovery_protocol::sha256(&canonical);
-    let tag = p.mac(format!("{survey_id}:{}", hex::encode(digest)).as_bytes())?;
-    let key = format!("{}{}", responses_prefix(survey_id), hex::encode(tag));
-    // An identical earlier submission is accepted once; a fenced slot means
-    // collection closed and must never be overwritten by a delayed submission.
-    let existing = |stored: Vec<u8>| match collection::read_slot(p, &key, &stored)? {
-        Slot::Open { .. } => Ok(Accepted { accepted: true }),
-        Slot::Fenced => Err(Error("survey is closed".into())),
-    };
-    if let Some(stored) = p.get(&key)? {
-        return existing(stored);
-    }
-    // Registration fails once collection has closed; a slot registered before
-    // that is on the closed list, so freezing reads or fences it.
-    collection::register(p, survey_id, &key)?;
-    let slot = Slot::Open {
-        submission: response,
-    };
-    if p.set_if_absent(&key, &collection::seal_slot(p, &key, &slot)?)? {
-        return Ok(Accepted { accepted: true });
-    }
-    // A concurrent identical submission or a freeze fence got there first.
-    existing(
-        p.get(&key)?
-            .ok_or_else(|| Error("response slot is missing".into()))?,
-    )
+    collection::admit(p, survey_id, response, &canonical)?;
+    Ok(Accepted { accepted: true })
 }
 
 fn rejected(reason: &str) -> Error {
@@ -148,23 +91,6 @@ pub fn status<P: Platform>(p: &P, survey_id: &str) -> Result<SurveyStatus> {
         key_present,
         report_released,
     })
-}
-
-pub fn load_definition<P: Platform>(p: &P, id: &str) -> Result<SurveyDefinition> {
-    let bytes = Records(p).require(&def_key(id), "survey")?;
-    let definition: SurveyDefinition = serde_json::from_slice(&bytes)?;
-    if hex::encode(definition.hash()?) != id {
-        return Err(Error("stored definition does not match its id".into()));
-    }
-    Ok(definition)
-}
-
-pub fn load_key<P: Platform>(p: &P, id: &str) -> Result<SurveyKey> {
-    let bytes = Records(p).require(&secret_key(id), "survey key")?;
-    let secret: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| Error("survey key is not 32 bytes".into()))?;
-    Ok(SurveyKey::from_bytes(secret))
 }
 
 #[cfg(test)]
@@ -242,6 +168,7 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::{created, definition, encrypt, response, send, DEADLINE};
     use super::*;
+    use crate::collection::{collection_key, responses_prefix, Slot};
     use crate::platform::memory::Memory;
     use discovery_protocol::envelope::seal;
     use discovery_protocol::response::{Basis, Disclosure};

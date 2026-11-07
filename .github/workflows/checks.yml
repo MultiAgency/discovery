@@ -16,6 +16,10 @@ jobs:
         run: shellcheck -x scripts/*.sh
       - name: Test transaction recovery offline
         run: scripts/test-smoke.sh
+      - name: Test invitation checkout checks offline
+        run: scripts/test-invitation.sh
+      - name: Test demo launcher offline
+        run: scripts/test-demo.sh
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy

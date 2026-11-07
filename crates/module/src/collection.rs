@@ -1,33 +1,64 @@
-//! Monotone collection closure using single-record CAS, without leases.
+//! Survey storage: the layout, admission, closure and cleanup.
 //!
-//! Register a slot before writing a response. Closing fixes the registration
-//! list, which names every slot ever written. Writers only insert, so a stored
-//! response is already immutable; freezing fences each empty registered slot
-//! so its delayed writer can never insert. Discard replaces contents with the
-//! same empty fence, which late CAS/inserts cannot overwrite. Neither depends
-//! on storage listing.
+//! Layout (raw records, every value sealed under the project key):
+//! - `s/{id}/def`: the canonical survey definition
+//! - `s/{id}/key`: X25519 secret, replaced with an empty marker after release
+//! - `s/{id}/collection`: admission state and the registration-list head, fixed at close
+//! - `s/{id}/report`: the released report
+//! - `s/{id}/r/{hex mac(id:response hash)}`: open response slot, later an empty fence
+//! - `s/{id}/i/{random}`: sealed registration metadata, no response content
+//!
+//! `{id}` is the hex definition hash, which is public. Response keys reveal
+//! nothing about who responded without the project key.
+//!
+//! Closure is monotone, using single-record CAS without leases. Register a
+//! slot before writing a response. Closing fixes the registration list, which
+//! names every slot ever written. Writers only insert, so a stored response is
+//! already immutable; freezing fences each empty registered slot so its delayed
+//! writer can never insert. Discard replaces contents with the same empty
+//! fence, which late CAS/inserts cannot overwrite. Neither depends on storage
+//! listing.
 //!
 //! OutLayer runs fail on their 126th storage call: twice on testnet, call
 //! #126 hung for the 30 s client timeout after 125 calls had succeeded, once a
-//! read and once a CAS. The cause is unresolved. Finalization therefore stays
-//! within 100 storage calls per finalizer, which bounds [`REGISTRATIONS`].
+//! read and once a CAS. The cause is unresolved. Finalization therefore aims
+//! for 100 storage calls per finalizer, which bounds [`REGISTRATIONS`].
 
 use crate::platform::{Platform, Records};
-use crate::survey::{collection_key, responses_prefix, secret_key};
+use discovery_protocol::definition::SurveyDefinition;
+use discovery_protocol::envelope::SurveyKey;
 use discovery_protocol::response::Response;
 use discovery_protocol::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+fn def_key(id: &str) -> String {
+    format!("s/{id}/def")
+}
+pub fn secret_key(id: &str) -> String {
+    format!("s/{id}/key")
+}
+pub fn collection_key(id: &str) -> String {
+    format!("s/{id}/collection")
+}
+pub fn report_key(id: &str) -> String {
+    format!("s/{id}/report")
+}
+pub fn responses_prefix(id: &str) -> String {
+    format!("s/{id}/r/")
+}
+
 const RETRIES: usize = 8;
 
-/// Registrations one survey admits. A run must stay at or under 100 storage
-/// calls: 125 succeeded on testnet and the 126th failed, so a quarter stays in
-/// reserve. Finalization costs 7 calls plus 3 per registration, or 5 for a slot
-/// whose delayed writer inserts while it is being frozen; 18 keeps one finalizer
-/// within 97 even if every slot races (a competing one adds calls after the report is stored). Registrations, not distinct responses, are counted,
-/// because each costs finalization the same work: racing identical submissions
-/// and interrupted ones each use a place.
+/// Registrations one survey admits. Finalization costs 7 storage calls plus 3
+/// per registration, or 5 for a slot whose delayed writer inserts while it is
+/// being frozen, plus 2 per closing attempt lost to a concurrent registration
+/// (at most 7). At 18, one finalizer needs 61 calls, 97 if every slot races and
+/// 111 if registrations also contend with closing: within the 100-call aim
+/// except in that last case, and below the 126th call that failed. A competing
+/// finalizer adds calls only after the report is stored. Registrations, not
+/// distinct responses, are counted, because each costs finalization the same
+/// work: racing identical submissions and interrupted ones each use a place.
 pub const REGISTRATIONS: u64 = 18;
 
 #[derive(Serialize, Deserialize)]
@@ -60,8 +91,13 @@ pub struct Frozen {
     slots: Vec<(String, Vec<u8>)>,
 }
 
-pub fn init<P: Platform>(p: &P, id: &str) -> Result<()> {
-    Records(p).set_if_absent(
+/// Store a new survey's definition, key and open collection, keeping any that
+/// already exist, and return its key.
+pub fn create<P: Platform>(p: &P, id: &str, definition: &SurveyDefinition) -> Result<SurveyKey> {
+    let records = Records(p);
+    records.set_if_absent(&def_key(id), &definition.canonical_bytes()?)?;
+    records.set_if_absent(&secret_key(id), &SurveyKey::generate()?.to_bytes())?;
+    records.set_if_absent(
         &collection_key(id),
         &serde_json::to_vec(&Collection {
             closed: false,
@@ -69,7 +105,56 @@ pub fn init<P: Platform>(p: &P, id: &str) -> Result<()> {
             registrations: 0,
         })?,
     )?;
-    Ok(())
+    load_key(p, id)
+}
+
+pub fn load_definition<P: Platform>(p: &P, id: &str) -> Result<SurveyDefinition> {
+    let bytes = Records(p).require(&def_key(id), "survey")?;
+    let definition: SurveyDefinition = serde_json::from_slice(&bytes)?;
+    if hex::encode(definition.hash()?) != id {
+        return Err(Error("stored definition does not match its id".into()));
+    }
+    Ok(definition)
+}
+
+pub fn load_key<P: Platform>(p: &P, id: &str) -> Result<SurveyKey> {
+    let bytes = Records(p).require(&secret_key(id), "survey key")?;
+    let secret: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| Error("survey key is not 32 bytes".into()))?;
+    Ok(SurveyKey::from_bytes(secret))
+}
+
+/// Store a validated response once. `canonical` is its serialization: the
+/// slot is named by content, not ciphertext, so re-encryption on a CLI retry is
+/// not another contribution; the keyed name prevents guessed-answer lookup.
+pub fn admit<P: Platform>(p: &P, id: &str, response: Response, canonical: &[u8]) -> Result<()> {
+    let digest = discovery_protocol::sha256(canonical);
+    let tag = p.mac(format!("{id}:{}", hex::encode(digest)).as_bytes())?;
+    let key = format!("{}{}", responses_prefix(id), hex::encode(tag));
+    // An identical earlier submission is accepted once; a fenced slot means
+    // collection closed and must never be overwritten by a delayed submission.
+    let existing = |stored: Vec<u8>| match read_slot(p, &key, &stored)? {
+        Slot::Open { .. } => Ok(()),
+        Slot::Fenced => Err(Error("survey is closed".into())),
+    };
+    if let Some(stored) = p.get(&key)? {
+        return existing(stored);
+    }
+    // Registration fails once collection has closed; a slot registered before
+    // that is on the closed list, so freezing reads or fences it.
+    register(p, id, &key)?;
+    let slot = Slot::Open {
+        submission: response,
+    };
+    if p.set_if_absent(&key, &seal_slot(p, &key, &slot)?)? {
+        return Ok(());
+    }
+    // A concurrent identical submission or a freeze fence got there first.
+    existing(
+        p.get(&key)?
+            .ok_or_else(|| Error("response slot is missing".into()))?,
+    )
 }
 
 fn state<P: Platform>(p: &P, id: &str) -> Result<(Vec<u8>, Collection)> {

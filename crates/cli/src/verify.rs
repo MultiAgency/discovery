@@ -6,26 +6,11 @@
 //! another build, and the owner was already locked before survey creation.
 //! A snapshot of the remaining versions alone cannot prove that history.
 
-use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::release::Release;
+use crate::rpc::{self, events, success_value, CONTRACT};
 use crate::Result;
-use rpc::{events, success_value};
-
-pub const CONTRACT: &str = "outlayer.testnet";
-
-/// The registered release (`releases.json`): the audited build and the
-/// organizer it runs as.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Release {
-    pub project: String,
-    #[serde(rename = "release")]
-    pub wasm_hash: String,
-    pub organizer: String,
-    #[serde(default)]
-    pub bootstrap: Option<crate::bootstrap::Bootstrap>,
-}
 
 pub struct Verified {
     pub public_key: String,
@@ -33,6 +18,7 @@ pub struct Verified {
 }
 
 pub fn survey_key(release: &Release, survey_id: &str, init_tx: &str) -> Result<Verified> {
+    eprintln!("Verifying survey creation on-chain...");
     let outcome = rpc::tx(init_tx, &release.organizer)?;
     let (input, output, block) = execution(&outcome, release)?;
     if input["operation"] != "init_survey" {
@@ -71,7 +57,7 @@ pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Va
         return Err("transaction is not a single request_execution".into());
     }
 
-    let requested = events(outcome, CONTRACT, "execution_requested");
+    let requested = events(outcome, "execution_requested");
     let [(event, block)] = requested.as_slice() else {
         return Err("transaction has no single execution_requested event".into());
     };
@@ -95,7 +81,7 @@ pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Va
         .into());
     }
     let input = execution_input(action, &request, release)?;
-    let completed = events(outcome, CONTRACT, "execution_completed");
+    let completed = events(outcome, "execution_completed");
     if completed.len() != 1 || completed[0].0["success"] != true {
         return Err("execution did not complete successfully exactly once".into());
     }
@@ -142,6 +128,7 @@ pub fn report(
     survey_id: &str,
     finalize_tx: &str,
 ) -> Result<discovery_protocol::report::Report> {
+    eprintln!("Verifying report finalization on-chain...");
     let outcome = rpc::tx(finalize_tx, &release.organizer)?;
     let (input, output, block) = execution(&outcome, release)?;
     let report = report_output(&input, output, survey_id)?;
@@ -173,6 +160,7 @@ fn report_output(
 /// At the execution block, the release must have been the project's only
 /// version, owned by an initialized account without access keys or code.
 fn require_locked(release: &Release, block: &str) -> Result<()> {
+    eprintln!("Checking the release build and owner lock...");
     let mut warnings = Vec::new();
     let project = rpc::view(
         block,
@@ -250,12 +238,10 @@ mod tests {
     }
 
     fn release() -> Release {
-        Release {
-            project: "owner/discovery".into(),
-            wasm_hash: "audited".into(),
-            organizer: "organizer.testnet".into(),
-            bootstrap: None,
-        }
+        serde_json::from_value(json!({"project": "owner/discovery", "release": "audited",
+            "organizer": "organizer.testnet", "bootstrap": {"owner_seed_block": "",
+            "owner_init_tx": "", "project_init_tx": "", "lock_tx": ""}}))
+        .unwrap()
     }
 
     fn output() -> Value {
@@ -456,119 +442,5 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert_eq!(error, "finalization did not complete: cleanup interrupted; reconcile, then retry finalization");
-    }
-}
-
-pub(crate) mod rpc {
-    //! Read-only NEAR JSON-RPC for release and report verification.
-
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    use serde_json::{json, Value};
-
-    use crate::Result;
-
-    const RPC: &str = "https://archival-rpc.testnet.fastnear.com";
-
-    pub(crate) fn call(method: &str, params: Value) -> Result<Value> {
-        let body =
-            json!({ "jsonrpc": "2.0", "id": "discovery", "method": method, "params": params });
-        // The public archival RPC rate-limits bursts and occasionally drops a
-        // request; every call is a read, so back off briefly and retry. An
-        // optional FastNEAR key raises the limit; it never changes the endpoint.
-        let key = std::env::var("FASTNEAR_API_KEY")
-            .ok()
-            .filter(|k| !k.is_empty());
-        let mut attempt = 0;
-        let reply: Value = loop {
-            attempt += 1;
-            let mut request = ureq::post(RPC).timeout(std::time::Duration::from_secs(30));
-            if let Some(key) = &key {
-                request = request.set("Authorization", &format!("Bearer {key}"));
-            }
-            match request.send_json(&body) {
-                Err(ureq::Error::Status(429 | 500..=599, _) | ureq::Error::Transport(_))
-                    if attempt < 6 =>
-                {
-                    std::thread::sleep(std::time::Duration::from_secs(5 * attempt));
-                }
-                Err(ureq::Error::Status(429, _)) => {
-                    return Err(
-                        "the archival RPC is rate-limiting this machine; wait a minute \
-                        and retry, or set FASTNEAR_API_KEY"
-                            .into(),
-                    )
-                }
-                result => break result?.into_json()?,
-            }
-        };
-        if let Some(e) = reply.get("error") {
-            return Err(format!("rpc {method}: {e}").into());
-        }
-        if let Some(e) = reply["result"].get("error") {
-            return Err(format!("rpc {method}: {e}").into());
-        }
-        Ok(reply["result"].clone())
-    }
-
-    /// Account state at a historical block (archival RPC).
-    pub fn query(block: &str, request_type: &str, account: &str) -> Result<Value> {
-        call(
-            "query",
-            json!({ "request_type": request_type, "account_id": account, "block_id": block }),
-        )
-    }
-
-    /// An OutLayer contract view at a historical block.
-    pub fn view(block: &str, method: &str, args: Value) -> Result<Value> {
-        let result = call(
-            "query",
-            json!({ "request_type": "call_function", "account_id": super::CONTRACT,
-                "method_name": method, "args_base64": B64.encode(serde_json::to_vec(&args)?),
-                "block_id": block }),
-        )?;
-        let bytes: Vec<u8> = serde_json::from_value(result["result"].clone())?;
-        Ok(serde_json::from_slice(&bytes)?)
-    }
-
-    pub fn tx(hash: &str, sender: &str) -> Result<Value> {
-        call(
-            "tx",
-            json!({ "tx_hash": hash, "sender_account_id": sender, "wait_until": "FINAL" }),
-        )
-    }
-
-    /// Decode the final `SuccessValue` of a transaction outcome as JSON.
-    pub fn success_value(outcome: &Value) -> Result<Value> {
-        let encoded = outcome["status"]["SuccessValue"]
-            .as_str()
-            .ok_or_else(|| format!("transaction did not succeed: {}", outcome["status"]))?;
-        Ok(serde_json::from_slice(&B64.decode(encoded)?)?)
-    }
-
-    /// `EVENT_JSON` logs with the given event name, with the receipt block hash.
-    pub fn events(outcome: &Value, contract: &str, event: &str) -> Vec<(Value, String)> {
-        let mut out = Vec::new();
-        for r in outcome["receipts_outcome"].as_array().into_iter().flatten() {
-            if r["outcome"]["executor_id"] != contract {
-                continue;
-            }
-            for log in r["outcome"]["logs"].as_array().into_iter().flatten() {
-                let Some(body) = log.as_str().and_then(|l| l.strip_prefix("EVENT_JSON:")) else {
-                    continue;
-                };
-                let Ok(v) = serde_json::from_str::<Value>(body) else {
-                    continue;
-                };
-                if v["standard"] == "near-outlayer" && v["event"] == event {
-                    for d in v["data"].as_array().into_iter().flatten() {
-                        out.push((
-                            d.clone(),
-                            r["block_hash"].as_str().unwrap_or_default().to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-        out
     }
 }

@@ -61,7 +61,7 @@ padding size; if the CLI says it is too large, shorten it with the owner's appro
       "question_id": "outcome",
       "basis": "confirmed",
       "disclosure": { "tier": "publishable" },
-      "text": "Setup should list every missing setting before making any network call."
+      "text": "Setup should name the missing setting before making any network call."
     }
   ]
 }

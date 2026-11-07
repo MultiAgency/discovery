@@ -5,10 +5,13 @@
 //! service's creation transaction before encrypting answers.
 
 mod bootstrap;
+mod invitation;
+mod release;
+mod rpc;
 mod verify;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use clap::{Parser, Subcommand};
@@ -16,9 +19,8 @@ use discovery_protocol::definition::{SurveyDefinition, Target};
 use discovery_protocol::envelope::{seal, MAX_RESPONSE};
 use discovery_protocol::response::Response;
 use discovery_protocol::SurveyStatus;
-use serde::Deserialize;
+use release::{is_hex, tx_hash, Release};
 use serde_json::{json, Value};
-use verify::Release;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -75,7 +77,7 @@ enum Command {
         survey_id: String,
         #[arg(long)]
         init_tx: String,
-        answers: PathBuf,
+        answers: std::path::PathBuf,
     },
     /// Print a verified report as Markdown for posting.
     Report {
@@ -83,184 +85,229 @@ enum Command {
         #[arg(long)]
         finalize_tx: String,
     },
+    /// Organizer: verify an accepting survey and print its invitation page.
+    ///
+    /// Run through `scripts/invitation.sh`, which checks a clean checkout and
+    /// commit reachability from cached canonical origin refs. Requires `--target`.
+    Invitation {
+        survey_id: String,
+        #[arg(long)]
+        init_tx: String,
+        /// The trusted checkout's commit that respondents install.
+        #[arg(long)]
+        commit: String,
+        /// The https:// URL where the invitation will be published.
+        #[arg(long)]
+        page: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum Preparation {
     /// Validate a definition for creation on the configured service.
-    Init { definition: PathBuf },
+    Init { definition: std::path::PathBuf },
     /// Finalize after the deadline, using the organizer's `nearai` secrets.
     Finalize { survey_id: String },
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Registry {
-    service: Option<Release>,
-}
-
-/// Refuse incomplete release pins before any network or paid request. The
-/// bootstrap transactions are checked on-chain during survey/report verification.
-fn configured_service(registry: &str) -> Result<Release> {
-    let release = serde_json::from_str::<Registry>(registry)?
-        .service
-        .ok_or("this build registers no release (releases.json has no registered service)")?;
-    let (owner, project) = release
-        .project
-        .split_once('/')
-        .ok_or("invalid registered project")?;
-    if !account_id(owner)
-        || project.is_empty()
-        || !project
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        || !account_id(&release.organizer)
-        || owner == release.organizer
-        || !is_hex(&release.wasm_hash, 32)
-    {
-        return Err("invalid registered project, build or organizer".into());
-    }
-    let proof = release.bootstrap.as_ref().ok_or(
-        "registered release has no clean bootstrap proof; use a newly bootstrapped release",
-    )?;
-    if !tx_hash(&proof.owner_seed_block) {
-        return Err("invalid registered bootstrap seed block".into());
-    }
-    let hashes = [&proof.owner_init_tx, &proof.project_init_tx, &proof.lock_tx];
-    if hashes.iter().any(|hash| !tx_hash(hash))
-        || hashes[0] == hashes[1]
-        || hashes[0] == hashes[2]
-        || hashes[1] == hashes[2]
-    {
-        return Err("invalid registered bootstrap transactions".into());
-    }
-    Ok(release)
-}
-
-fn account_id(id: &str) -> bool {
-    (2..=64).contains(&id.len())
-        && id.split(['.', '-', '_']).all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        })
-}
-
-fn is_hex(s: &str, bytes: usize) -> bool {
-    s.len() == 2 * bytes && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// A command whose local inputs have all been read and validated.
-enum Checked<'a> {
-    /// Unsigned arguments to print: the survey id and the module input.
-    Prepare(String, Value),
-    Verify(&'a str, &'a str, &'a str),
-    Submit(&'a str, &'a str, &'a str, Response),
-    Report(&'a str, &'a str),
-}
-
-/// Every check that needs no network, reported together before any RPC or
-/// paid call. Error messages never echo the inputs.
-fn check<'a>(cli: &'a Cli, registry: &str) -> Result<(Release, Checked<'a>)> {
-    let mut errors = Vec::new();
-    let e = &mut errors;
-    let release = keep(e, configured_service(registry));
-    if let Some(target) = &cli.target {
-        let valid = target.rsplit_once('#').is_some_and(|(repo, number)| {
-            repo.split('/').filter(|p| !p.is_empty()).count() == 2
-                && repo.matches('/').count() == 1
-                && number.parse::<u64>().is_ok_and(|n| n > 0)
-        });
-        if !valid {
-            e.push("--target must look like OWNER/REPO#NUMBER".into());
+fn main() -> std::process::ExitCode {
+    match run(Cli::parse(), REGISTRY) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("discovery: {error}");
+            std::process::ExitCode::FAILURE
         }
     }
-    let checked = match &cli.command {
-        Command::Prepare {
-            operation: Preparation::Init { definition },
-        } => keep(e, read_definition(definition, cli.target.as_deref()))
-            .map(|(id, input)| Checked::Prepare(id, input)),
-        Command::Prepare {
-            operation: Preparation::Finalize { survey_id },
-        } => {
-            survey(e, survey_id);
-            if cli.target.is_some() {
-                e.push("verify the survey's target before preparing finalization".into());
-            }
-            let input = json!({"operation": "finalize", "survey_id": survey_id});
-            Some(Checked::Prepare(survey_id.clone(), input))
+}
+
+/// Each command checks its local inputs before any network or paid call and
+/// stops at the first problem. Error messages never echo the inputs.
+fn run(cli: Cli, registry: &str) -> Result<()> {
+    let Cli {
+        payment_key,
+        target,
+        command,
+    } = cli;
+    let release = Release::registered(registry)?;
+    let target = target.as_deref();
+    if let Some(target) = target {
+        check_target_format(target)?;
+    }
+    match command {
+        Command::Prepare { operation } => {
+            let (survey_id, input) = match operation {
+                Preparation::Init { definition } => read_definition(&definition, target)?,
+                Preparation::Finalize { survey_id } => {
+                    check_survey_id(&survey_id)?;
+                    if target.is_some() {
+                        return Err(
+                            "verify the survey's target before preparing finalization".into()
+                        );
+                    }
+                    let input = json!({"operation": "finalize", "survey_id": survey_id});
+                    (survey_id, input)
+                }
+            };
+            eprintln!("survey_id: {survey_id}");
+            print(&request(&release, input))
         }
         Command::Verify { survey_id, init_tx } => {
-            survey(e, survey_id);
-            tx(e, init_tx);
-            payment_key(e, cli).map(|key| Checked::Verify(survey_id, init_tx, key))
+            check_survey_id(&survey_id)?;
+            check_tx(&init_tx)?;
+            let key = check_payment_key(payment_key.as_deref())?;
+            let (survey, state, accepting) =
+                verified_state(&release, &survey_id, &init_tx, key, target)?;
+            if accepting {
+                eprintln!(
+                    "Next: have your agent draft answers.json with \
+                     skills/discovery-respondent/SKILL.md (format: `discovery submit --help`), \
+                     approve the exact answers, then run `discovery submit {survey_id} \
+                     --init-tx {init_tx} answers.json`. The deadline is the earliest \
+                     finalization time; answers count until finalization starts."
+                );
+            }
+            print(&json!({
+                "survey_id": survey_id,
+                "release": release.wasm_hash,
+                "definition": survey.definition,
+                "accepting_responses": accepting,
+                "closed": state.closed,
+                "full": state.full,
+                "key_present": state.key_present,
+                "report_released": state.report_released,
+            }))
         }
         Command::Submit {
             survey_id,
             init_tx,
             answers,
         } => {
-            survey(e, survey_id);
-            tx(e, init_tx);
-            let key = payment_key(e, cli);
-            let response = keep(e, read_answers(answers));
-            key.zip(response)
-                .map(|(key, response)| Checked::Submit(survey_id, init_tx, key, response))
+            check_survey_id(&survey_id)?;
+            check_tx(&init_tx)?;
+            let key = check_payment_key(payment_key.as_deref())?;
+            let response = read_answers(&answers)?;
+            let survey = verified(&release, &survey_id, &init_tx, target)?;
+            let envelope = seal_answers(&survey, response)?;
+            require_accepted(&call(
+                &release,
+                key,
+                json!({ "operation": "submit", "survey_id": survey_id, "envelope": envelope }),
+            )?)?;
+            println!("Submitted. Responses are immutable; identical retries are counted once.");
+            Ok(())
         }
         Command::Report {
             survey_id,
             finalize_tx,
         } => {
-            survey(e, survey_id);
-            tx(e, finalize_tx);
-            Some(Checked::Report(survey_id, finalize_tx))
+            check_survey_id(&survey_id)?;
+            check_tx(&finalize_tx)?;
+            let report = verify::report(&release, &survey_id, &finalize_tx)?;
+            check_target(&report.target, target)?;
+            eprintln!("Verified against the release's on-chain finalize output.");
+            print!(
+                "{}\n---\nReleased by survey `{survey_id}` (finalize tx `{finalize_tx}`, release `{}`). \
+                 Verify with this CLI: `discovery report {survey_id} --finalize-tx {finalize_tx}`.\n",
+                report.markdown(),
+                release.wasm_hash,
+            );
+            Ok(())
         }
-    };
-    match (release, checked) {
-        (Some(release), Some(checked)) if errors.is_empty() => Ok((release, checked)),
-        _ => Err(format!("local configuration errors:\n- {}", errors.join("\n- ")).into()),
+        Command::Invitation {
+            survey_id,
+            init_tx,
+            commit,
+            page,
+        } => {
+            check_survey_id(&survey_id)?;
+            check_tx(&init_tx)?;
+            if target.is_none() {
+                return Err("--target is required: the issue the invitation is for".into());
+            }
+            invitation::check_details(&commit, &page)?;
+            let key = check_payment_key(payment_key.as_deref())?;
+            invitation::check_payment_key(key)?;
+            let (survey, _, accepting) =
+                verified_state(&release, &survey_id, &init_tx, key, target)?;
+            if !accepting {
+                return Err("the survey is not accepting responses; invite to a new survey".into());
+            }
+            print!(
+                "{}",
+                invitation::render(&invitation::Invitation {
+                    definition: &survey.definition,
+                    survey_id: &survey_id,
+                    init_tx: &init_tx,
+                    release: &release.wasm_hash,
+                    payment_key: key,
+                    commit: &commit,
+                    page: &page,
+                })?
+            );
+            Ok(())
+        }
     }
 }
 
-fn keep<T>(errors: &mut Vec<String>, result: Result<T>) -> Option<T> {
-    result.map_err(|e| errors.push(e.to_string())).ok()
+/// `verify`'s checks: the chain-authenticated survey, the service's state for
+/// that same definition, and whether it accepts new responses.
+fn verified_state(
+    release: &Release,
+    survey_id: &str,
+    init_tx: &str,
+    key: &str,
+    expected: Option<&str>,
+) -> Result<(verify::Verified, SurveyStatus, bool)> {
+    let survey = verified(release, survey_id, init_tx, expected)?;
+    eprintln!("Checking current collection state...");
+    let state: SurveyStatus = serde_json::from_value(call(
+        release,
+        key,
+        json!({ "operation": "status", "survey_id": survey_id }),
+    )?)?;
+    if state.definition != survey.definition {
+        return Err("OutLayer reports a different definition than the chain".into());
+    }
+    let accepting = state.key_present && !state.closed && !state.full;
+    Ok((survey, state, accepting))
 }
 
-fn survey(errors: &mut Vec<String>, id: &str) {
+fn check_target_format(target: &str) -> Result<()> {
+    let valid = target.rsplit_once('#').is_some_and(|(repo, number)| {
+        repo.split('/').filter(|p| !p.is_empty()).count() == 2
+            && repo.matches('/').count() == 1
+            && number.parse::<u64>().is_ok_and(|n| n > 0)
+    });
+    if !valid {
+        return Err("--target must look like OWNER/REPO#NUMBER".into());
+    }
+    Ok(())
+}
+
+fn check_survey_id(id: &str) -> Result<()> {
     if !is_hex(id, 32) {
-        errors.push("not a survey id (64 hex characters)".into());
+        return Err("not a survey id (64 hex characters)".into());
     }
+    Ok(())
 }
 
-fn tx(errors: &mut Vec<String>, hash: &str) {
+fn check_tx(hash: &str) -> Result<()> {
     if !tx_hash(hash) {
-        errors.push("not a NEAR transaction hash".into());
+        return Err("not a NEAR transaction hash".into());
     }
+    Ok(())
 }
 
-fn tx_hash(hash: &str) -> bool {
-    const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    (32..=44).contains(&hash.len()) && hash.bytes().all(|b| BASE58.contains(&b))
-}
-
-fn payment_key<'a>(errors: &mut Vec<String>, cli: &'a Cli) -> Option<&'a str> {
-    match cli.payment_key.as_deref() {
-        Some(key) if key.splitn(3, ':').filter(|part| !part.is_empty()).count() == 3 => Some(key),
-        Some(_) => {
-            errors.push("DISCOVERY_PAYMENT_KEY must look like owner:nonce:secret".into());
-            None
-        }
-        None => {
-            errors
-                .push("DISCOVERY_PAYMENT_KEY is not set; it is in the survey announcement".into());
-            None
-        }
+fn check_payment_key(key: Option<&str>) -> Result<&str> {
+    match key {
+        Some(key) if key.splitn(3, ':').filter(|part| !part.is_empty()).count() == 3 => Ok(key),
+        Some(_) => Err("DISCOVERY_PAYMENT_KEY must look like owner:nonce:secret".into()),
+        None => Err("DISCOVERY_PAYMENT_KEY is not set; it is in the survey announcement".into()),
     }
 }
 
 /// The survey id and creation input of a valid definition for `expected`.
-fn read_definition(path: &PathBuf, expected: Option<&str>) -> Result<(String, Value)> {
+fn read_definition(path: &Path, expected: Option<&str>) -> Result<(String, Value)> {
     let bytes = fs::read(path).map_err(|_| "cannot read definition file")?;
     let definition: SurveyDefinition =
         serde_json::from_slice(&bytes).map_err(|_| "invalid survey definition JSON")?;
@@ -283,7 +330,7 @@ fn read_definition(path: &PathBuf, expected: Option<&str>) -> Result<(String, Va
 
 /// Parse answers and check their shape and size; question ids need the
 /// verified definition.
-fn read_answers(path: &PathBuf) -> Result<Response> {
+fn read_answers(path: &Path) -> Result<Response> {
     let bytes = fs::read(path).map_err(|_| "cannot read answers file")?;
     let response: Response = serde_json::from_slice(&bytes)
         .map_err(|_| "invalid answers JSON; see `discovery submit --help` for the format")?;
@@ -387,177 +434,28 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-fn main() -> std::process::ExitCode {
-    match run(&Cli::parse()) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("discovery: {error}");
-            std::process::ExitCode::FAILURE
-        }
-    }
-}
-
-fn run(cli: &Cli) -> Result<()> {
-    let (release, checked) = check(cli, REGISTRY)?;
-    let expected = cli.target.as_deref();
-    match checked {
-        Checked::Prepare(survey_id, input) => {
-            eprintln!("survey_id: {survey_id}");
-            print(&request(&release, input))?;
-        }
-        Checked::Verify(survey_id, init_tx, key) => {
-            let survey = verified(&release, survey_id, init_tx, expected)?;
-            let state: SurveyStatus = serde_json::from_value(call(
-                &release,
-                key,
-                json!({ "operation": "status", "survey_id": survey_id }),
-            )?)?;
-            if state.definition != survey.definition {
-                return Err("OutLayer reports a different definition than the chain".into());
-            }
-            let accepting = state.key_present && !state.closed && !state.full;
-            if accepting {
-                eprintln!(
-                    "Next: have your agent draft answers.json with \
-                     skills/discovery-respondent/SKILL.md (format: `discovery submit --help`), \
-                     approve the exact answers, then run `discovery submit {survey_id} \
-                     --init-tx {init_tx} answers.json`. The deadline is the earliest \
-                     finalization time; answers count until finalization starts."
-                );
-            }
-            print(&json!({
-                "survey_id": survey_id,
-                "release": release.wasm_hash,
-                "definition": survey.definition,
-                "accepting_responses": accepting,
-                "closed": state.closed,
-                "full": state.full,
-                "key_present": state.key_present,
-                "report_released": state.report_released,
-            }))?;
-        }
-        Checked::Submit(survey_id, init_tx, key, response) => {
-            let envelope =
-                seal_answers(&verified(&release, survey_id, init_tx, expected)?, response)?;
-            require_accepted(&call(
-                &release,
-                key,
-                json!({ "operation": "submit", "survey_id": survey_id, "envelope": envelope }),
-            )?)?;
-            println!("Submitted. Responses are immutable; identical retries are counted once.");
-        }
-        Checked::Report(survey_id, finalize_tx) => {
-            let report = verify::report(&release, survey_id, finalize_tx)?;
-            check_target(&report.target, expected)?;
-            eprintln!("Verified against the release's on-chain finalize output.");
-            print!(
-                "{}\n---\nReleased by survey `{survey_id}` (finalize tx `{finalize_tx}`, release `{}`). \
-                 Verify with this CLI: `discovery report {survey_id} --finalize-tx {finalize_tx}`.\n",
-                report.markdown(),
-                release.wasm_hash,
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use release::tests::{registry, RELEASE};
 
-    const RELEASE: &str = "5f1e3c2a9b8d7e6f5f1e3c2a9b8d7e6f5f1e3c2a9b8d7e6f5f1e3c2a9b8d7e6f";
-
-    fn registry(release: &str) -> String {
-        json!({"service": {"project": "owner.testnet/discovery", "release": release,
-        "organizer": "organizer.testnet", "bootstrap": {
-            "owner_seed_block": "4".repeat(43),
-            "owner_init_tx": "1".repeat(43),
-            "project_init_tx": "2".repeat(43),
-            "lock_tx": "3".repeat(43)
-        }}})
-        .to_string()
+    /// The local error `args` stop at, with the payment key `key`. Every
+    /// case here fails before any network call.
+    fn local_error(args: &[&str], key: Option<&str>) -> String {
+        local_error_with(&registry().to_string(), args, key)
     }
 
-    /// Whatever this checkout registers must be usable or explicitly absent.
-    #[test]
-    fn the_compiled_registry_is_absent_or_valid() {
-        if let Err(error) = configured_service(REGISTRY) {
-            assert_eq!(
-                error.to_string(),
-                "this build registers no release (releases.json has no registered service)"
-            );
-        }
+    fn local_error_with(registry: &str, args: &[&str], key: Option<&str>) -> String {
+        let mut cli = Cli::try_parse_from(args).unwrap();
+        cli.payment_key = key.map(String::from);
+        run(cli, registry).unwrap_err().to_string()
     }
 
-    #[test]
-    fn registry_entries_parse_strictly() {
-        let error = configured_service(r#"{"service": null}"#).err().unwrap();
-        assert_eq!(
-            error.to_string(),
-            "this build registers no release (releases.json has no registered service)"
-        );
-        for registry in [
-            r#"{"service": null, "historical": []}"#,
-            r#"{"service": null, "unexpected": true}"#,
-        ] {
-            let error = configured_service(registry).err().unwrap().to_string();
-            assert!(error.contains("unknown field"), "{error}");
-        }
-        assert_eq!(
-            configured_service(&registry(RELEASE)).unwrap().wasm_hash,
-            RELEASE
-        );
-        let mut extra: Value = serde_json::from_str(&registry(RELEASE)).unwrap();
-        extra["service"]["network"] = json!("mainnet");
-        assert!(configured_service(&extra.to_string()).is_err());
-    }
-
-    #[test]
-    fn incomplete_or_ambiguous_release_provenance_is_refused_offline() {
-        let valid: Value = serde_json::from_str(&registry(RELEASE)).unwrap();
-        for field in ["project", "release", "organizer"] {
-            let mut bad = valid.clone();
-            bad["service"][field] = json!("invalid//value");
-            assert!(configured_service(&bad.to_string()).is_err());
-        }
-        let mut bad = valid.clone();
-        bad["service"]["organizer"] = json!("owner.testnet");
-        assert!(configured_service(&bad.to_string()).is_err());
-        let mut bad = valid.clone();
-        bad["service"].as_object_mut().unwrap().remove("bootstrap");
-        assert!(configured_service(&bad.to_string()).is_err());
-        let mut bad = valid.clone();
-        bad["service"]["bootstrap"]
-            .as_object_mut()
-            .unwrap()
-            .remove("owner_seed_block");
-        assert!(configured_service(&bad.to_string()).is_err());
-        for seed in [
-            "",
-            "invalid",
-            &"1".repeat(31),
-            &"1".repeat(45),
-            &"0".repeat(43),
-        ] {
-            let mut bad = valid.clone();
-            bad["service"]["bootstrap"]["owner_seed_block"] = json!(seed);
-            assert_eq!(
-                configured_service(&bad.to_string())
-                    .err()
-                    .unwrap()
-                    .to_string(),
-                "invalid registered bootstrap seed block"
-            );
-        }
-        for field in ["owner_init_tx", "project_init_tx", "lock_tx"] {
-            let mut bad = valid.clone();
-            bad["service"]["bootstrap"][field] = json!("invalid");
-            assert!(configured_service(&bad.to_string()).is_err());
-        }
-        let mut bad = valid;
-        bad["service"]["bootstrap"]["lock_tx"] =
-            bad["service"]["bootstrap"]["project_init_tx"].clone();
-        assert!(configured_service(&bad.to_string()).is_err());
+    fn temp_file(name: &str, contents: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("discovery-{name}-{}.json", std::process::id()));
+        fs::write(&path, contents).unwrap();
+        path
     }
 
     #[test]
@@ -590,93 +488,82 @@ mod tests {
     }
 
     #[test]
-    fn preflight_collects_all_local_errors_without_echoing_inputs() {
-        let mut cli = Cli::try_parse_from([
-            "discovery",
-            "--target",
-            "SECRET",
-            "submit",
-            "SECRET",
-            "--init-tx",
-            "SECRET",
-            "/missing/SECRET",
-        ])
-        .unwrap();
-        cli.payment_key = None;
-        let error = check(&cli, r#"{"service": null}"#)
-            .err()
-            .unwrap()
-            .to_string();
-        for expected in [
-            "this build registers no release",
-            "OWNER/REPO#NUMBER",
-            "not a survey id",
-            "not a NEAR transaction hash",
-            "DISCOVERY_PAYMENT_KEY is not set",
-            "cannot read answers file",
-        ] {
-            assert!(error.contains(expected), "{error}");
-        }
-        assert!(!error.contains("SECRET"));
-        assert!(error.find("registers no release") < error.find("DISCOVERY_PAYMENT_KEY"));
-    }
-
-    #[test]
-    fn local_input_errors_come_before_any_network_call() {
-        let answers =
-            std::env::temp_dir().join(format!("discovery-answers-{}.json", std::process::id()));
+    fn local_errors_stop_before_any_network_call_without_echoing_inputs() {
         let survey = "c".repeat(64);
         let tx = "8hT4w1nDgUUcV2Z4ztUn5JAtM4uWr6xkJyvQHbTTvAcK";
-        let run = |args: &[&str], key: Option<&str>| {
-            let mut cli = Cli::try_parse_from(args).unwrap();
-            cli.payment_key = key.map(String::from);
-            check(&cli, &registry(RELEASE))
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        };
-        fs::write(
-            &answers,
-            r#"{"answers": [{"question_id": "q", "basis": "observed", "text": "x"}]}"#,
-        )
-        .unwrap();
-        let file = answers.to_str().unwrap();
         let key = Some("organizer.testnet:1:secret");
-        assert!(run(
-            &["discovery", "submit", &survey, "--init-tx", tx, file],
-            key
-        )
-        .is_ok());
-        assert!(run(
-            &["discovery", "submit", &survey, "--init-tx", tx, file],
-            None
-        )
-        .unwrap_err()
-        .contains("DISCOVERY_PAYMENT_KEY is not set"));
-        assert!(run(
-            &["discovery", "verify", &survey, "--init-tx", tx],
-            Some("secret")
-        )
-        .unwrap_err()
-        .contains("owner:nonce:secret"));
-        assert!(run(
-            &["discovery", "verify", "not-a-survey", "--init-tx", tx],
-            key
-        )
-        .unwrap_err()
-        .contains("not a survey id"));
-        assert!(run(
-            &[
-                "discovery",
-                "report",
-                &survey,
-                "--finalize-tx",
-                "0xdeadbeef"
-            ],
-            None
-        )
-        .unwrap_err()
-        .contains("not a NEAR transaction hash"));
-        assert!(run(&["discovery", "prepare", "finalize", "not-a-survey"], None).is_err());
+        let answers = temp_file(
+            "answers",
+            r#"{"answers": [{"question_id": "q", "basis": "observed", "text": "x"}]}"#,
+        );
+        let file = answers.to_str().unwrap();
+        let submit = ["discovery", "submit", &survey, "--init-tx", tx, file];
+        let cases: &[(&[&str], Option<&str>, &str)] = &[
+            (
+                &[
+                    "discovery",
+                    "--target",
+                    "SECRET",
+                    "submit",
+                    "SECRET",
+                    "--init-tx",
+                    "SECRET",
+                    "/SECRET",
+                ],
+                None,
+                "--target must look like OWNER/REPO#NUMBER",
+            ),
+            (
+                &["discovery", "submit", "SECRET", "--init-tx", tx, file],
+                key,
+                "not a survey id",
+            ),
+            (
+                &["discovery", "submit", &survey, "--init-tx", "SECRET", file],
+                key,
+                "not a NEAR transaction hash",
+            ),
+            (&submit, None, "DISCOVERY_PAYMENT_KEY is not set"),
+            (&submit, Some("SECRET"), "owner:nonce:secret"),
+            (
+                &[
+                    "discovery",
+                    "submit",
+                    &survey,
+                    "--init-tx",
+                    tx,
+                    "/missing/SECRET",
+                ],
+                key,
+                "cannot read answers file",
+            ),
+            (
+                &["discovery", "verify", "not-a-survey", "--init-tx", tx],
+                key,
+                "not a survey id",
+            ),
+            (
+                &[
+                    "discovery",
+                    "report",
+                    &survey,
+                    "--finalize-tx",
+                    "0xdeadbeef",
+                ],
+                None,
+                "not a NEAR transaction hash",
+            ),
+            (
+                &["discovery", "prepare", "finalize", "not-a-survey"],
+                None,
+                "not a survey id",
+            ),
+        ];
+        for (args, key, expected) in cases {
+            let error = local_error(args, *key);
+            assert!(error.contains(expected), "{args:?}: {error}");
+            assert!(!error.contains("SECRET"), "{error}");
+        }
         for target in [
             "owner/repo",
             "owner#1",
@@ -684,92 +571,111 @@ mod tests {
             "a/b/c#1",
             "/repo#1",
         ] {
-            assert!(
-                run(
-                    &[
-                        "discovery",
-                        "--target",
-                        target,
-                        "report",
-                        &survey,
-                        "--finalize-tx",
-                        tx
-                    ],
-                    None
-                )
-                .unwrap_err()
-                .contains("OWNER/REPO#NUMBER"),
-                "{target}"
-            );
-        }
-        assert!(run(
-            &[
+            let args = [
                 "discovery",
                 "--target",
-                "owner/repo#7",
+                target,
                 "report",
                 &survey,
                 "--finalize-tx",
-                tx
-            ],
-            None
+                tx,
+            ];
+            assert!(
+                local_error(&args, None).contains("OWNER/REPO#NUMBER"),
+                "{target}"
+            );
+        }
+        // An unregistered release stops every command first.
+        let error = local_error_with(r#"{"service": null}"#, &submit, None);
+        assert!(error.contains("does not register a release"), "{error}");
+        fs::remove_file(answers).unwrap();
+    }
+
+    #[test]
+    fn invitation_preflight_requires_target_and_publication_details() {
+        let survey = "c".repeat(64);
+        let tx = "8hT4w1nDgUUcV2Z4ztUn5JAtM4uWr6xkJyvQHbTTvAcK";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let page = "https://example.invalid/invitation";
+        let error = |target: Option<&str>, commit: &str, page: &str, key: Option<&str>| {
+            let mut args = vec!["discovery"];
+            if let Some(target) = target {
+                args.extend(["--target", target]);
+            }
+            args.extend(["invitation", &survey, "--init-tx", tx]);
+            args.extend(["--commit", commit, "--page", page]);
+            local_error(&args, key)
+        };
+        let target = Some("owner/repo#1");
+        for key in [
+            "organizer.testnet:1:SECRET$(echo)",
+            "organizer.testnet:1:SECRET\nexport",
+            "organizer.testnet:1:SECRET'",
+        ] {
+            let error = error(target, commit, page, Some(key));
+            assert!(error.contains("payment key"), "{error}");
+            assert!(!error.contains("SECRET"));
+        }
+        let key = Some("organizer.testnet:1:secret");
+        for (target, commit, page, key, expected) in [
+            (None, commit, page, key, "--target is required"),
+            (target, "SECRET", page, key, "--commit"),
+            (target, commit, "SECRET", key, "--page"),
+            (
+                target,
+                commit,
+                page,
+                None,
+                "DISCOVERY_PAYMENT_KEY is not set",
+            ),
+        ] {
+            let error = error(target, commit, page, key);
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("SECRET"));
+        }
+    }
+
+    #[test]
+    fn answers_are_checked_locally_for_shape_and_size() {
+        let answers = |contents: &str| {
+            let file = temp_file("shape", contents);
+            let result = read_answers(&file).map_err(|e| e.to_string());
+            fs::remove_file(file).unwrap();
+            result
+        };
+        assert!(answers(
+            r#"{"answers": [{"question_id": "q", "basis": "observed", "text": "x"}]}"#
         )
         .is_ok());
         let long = format!(
             r#"{{"answers": [{{"question_id": "q", "basis": "observed", "text": "{}"}}]}}"#,
-            "x".repeat(discovery_protocol::envelope::MAX_RESPONSE)
+            "x".repeat(MAX_RESPONSE)
         );
-        fs::write(&answers, long).unwrap();
-        assert!(run(
-            &["discovery", "submit", &survey, "--init-tx", tx, file],
-            key
-        )
-        .unwrap_err()
-        .contains("byte limit"));
+        assert!(answers(&long).unwrap_err().contains("byte limit"));
         for invalid in [
             r#"{"answers": []}"#,
             r#"{"answers": [{"question_id": "q", "basis": "observed", "text": " "}]}"#,
             r#"{"answers": [{"question_id": "q", "basis": "observed", "text": "x",
                 "disclosure": {"tier": "context_only", "phrasing": " "}}]}"#,
         ] {
-            fs::write(&answers, invalid).unwrap();
-            assert!(run(
-                &["discovery", "submit", &survey, "--init-tx", tx, file],
-                key
-            )
-            .unwrap_err()
-            .contains("no blank text or phrasing"));
+            assert!(answers(invalid)
+                .unwrap_err()
+                .contains("no blank text or phrasing"));
         }
-        fs::write(&answers, "{").unwrap();
-        assert!(run(
-            &["discovery", "submit", &survey, "--init-tx", tx, file],
-            key
-        )
-        .is_err());
-        fs::remove_file(answers).unwrap();
+        assert!(answers("{").unwrap_err().contains("invalid answers JSON"));
     }
 
     #[test]
     fn preparation_validates_inputs_and_uses_the_registered_release() {
-        let file =
-            std::env::temp_dir().join(format!("discovery-prepare-{}.json", std::process::id()));
-        let path = file.to_str().unwrap();
-        let prepare = |args: &[&str]| -> Result<Value> {
-            let cli = Cli::try_parse_from(args).unwrap();
-            match check(&cli, &registry(RELEASE))? {
-                (release, Checked::Prepare(_, input)) => Ok(request(&release, input)),
-                _ => unreachable!(),
-            }
-        };
+        let release = Release::registered(&registry().to_string()).unwrap();
         let definition = json!({"version": discovery_protocol::definition::DEFINITION_VERSION,
             "title": "Onboarding", "target": {"repo": "another/repo", "number": 42},
             "deadline_ns": 1900000000000000000u64,
             "questions": [{"id": "workflow", "prompt": "What did you try?"}],
             "rules": {"no_direct_quotes": false, "withheld_terms": []}});
-        fs::write(&file, definition.to_string()).unwrap();
-        let init =
-            |target: &str| prepare(&["discovery", "--target", target, "prepare", "init", path]);
-        let creation = init("another/repo#42").unwrap();
+        let file = temp_file("prepare", &definition.to_string());
+        let (_, input) = read_definition(&file, Some("another/repo#42")).unwrap();
+        let creation = request(&release, input);
         assert_eq!(
             serde_json::from_str::<Value>(creation["input_data"].as_str().unwrap()).unwrap(),
             json!({"operation": "init_survey", "definition": definition})
@@ -780,25 +686,24 @@ mod tests {
         );
         assert_eq!(creation["resource_limits"]["max_execution_seconds"], 60);
         assert!(creation.get("secrets_ref").is_none());
-        assert!(init("wrong/repo#42").is_err());
+        assert!(read_definition(&file, Some("wrong/repo#42")).is_err());
         let mut past = definition.clone();
         past["deadline_ns"] = json!(1_000_000_000_000_000_000u64);
         fs::write(&file, past.to_string()).unwrap();
-        assert!(prepare(&["discovery", "prepare", "init", path])
+        assert!(read_definition(&file, None)
             .unwrap_err()
             .to_string()
             .contains("has passed"));
         fs::write(&file, "{}").unwrap();
-        assert!(prepare(&["discovery", "prepare", "init", path]).is_err());
+        assert!(read_definition(&file, None).is_err());
         fs::remove_file(file).unwrap();
 
         let survey_id = "c".repeat(64);
-        let finalization = prepare(&["discovery", "prepare", "finalize", &survey_id]).unwrap();
-        assert_eq!(finalization["source"], creation["source"]);
-        assert_eq!(
-            serde_json::from_str::<Value>(finalization["input_data"].as_str().unwrap()).unwrap(),
-            json!({"operation": "finalize", "survey_id": survey_id})
+        let finalization = request(
+            &release,
+            json!({"operation": "finalize", "survey_id": survey_id}),
         );
+        assert_eq!(finalization["source"], creation["source"]);
         assert_eq!(
             finalization["resource_limits"]["max_execution_seconds"],
             180
@@ -807,15 +712,18 @@ mod tests {
             finalization["secrets_ref"],
             json!({"profile": "nearai", "account_id": "organizer.testnet"})
         );
-        assert!(prepare(&[
-            "discovery",
-            "--target",
-            "another/repo#42",
-            "prepare",
-            "finalize",
-            &survey_id
-        ])
-        .is_err());
+        assert!(local_error(
+            &[
+                "discovery",
+                "--target",
+                "another/repo#42",
+                "prepare",
+                "finalize",
+                &survey_id
+            ],
+            None
+        )
+        .contains("verify the survey's target"));
     }
 
     #[test]

@@ -108,12 +108,12 @@ expect "the next finalization skips both completed attempts" test "$(next_finali
 # check_public: the uppercase fixture marker and identifiers fail; ordinary
 # words such as an approved phrasing ("a synthetic workload respondent") pass.
 report="$tmp/report.md"
-printf 'SYNTHETIC: Setup should list every missing local setting.\n' > "$report"
+printf 'SYNTHETIC: Setup should name the missing local setting.\n' > "$report"
 expect "a verbatim fixture marker fails" fails check_public "$report"
 printf 'Seen on qa-runner-3.internal.example.invalid.\n' > "$report"
 expect "a fixture identifier fails" fails check_public "$report"
 # The count phrases the module's tests use (crates/module/src/checks.rs).
-phrases="$repo/scripts/synthetic/count-phrases.json"
+phrases="$repo/fixtures/count-phrases.json"
 # By index, so a phrase containing a line break stays one report.
 for (( i = 0; i < $(jq '.counted | length' "$phrases"); i++ )); do
   jq -r ".counted[$i]" "$phrases" > "$report"
@@ -149,7 +149,7 @@ cat > "$tmp/bin/discovery" <<'EOF2'
 printf '%s\n' "$STUB_REPORT"
 EOF2
 chmod +x "$tmp/bin/discovery"
-STUB_REPORT='Setup should list every missing local setting.' \
+STUB_REPORT='Setup should name the missing local setting.' \
   expect "a verified, clean report passes" succeeds fetch_report "$dir" HashOfTheSignedTx1111111111111111111111 "$tmp/r.md"
 STUB_VERIFY_FAILS=1 \
   expect "an unverified finalization fails" fails fetch_report "$dir" HashOfTheSignedTx1111111111111111111111 "$tmp/r.md"

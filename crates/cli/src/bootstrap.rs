@@ -11,17 +11,10 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::verify::{owner_is_locked, rpc, Release, CONTRACT};
+use crate::release::{Bootstrap, Release};
+use crate::rpc::{self, CONTRACT};
+use crate::verify::owner_is_locked;
 use crate::Result;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Bootstrap {
-    pub owner_seed_block: String,
-    pub owner_init_tx: String,
-    pub project_init_tx: String,
-    pub lock_tx: String,
-}
 
 struct Account {
     value: Value,
@@ -66,19 +59,22 @@ const BOOTSTRAP_RULES: &str = "v1";
 /// checks that depend on it: its block follows the lock, and the project there
 /// is the proved one. Anything else, or any cache problem, runs the full proof.
 pub fn verify(release: &Release, execution_block: &str, current_project: &Value) -> Result<()> {
-    let (_, owner, _, _) = identity(release)?;
     if let Some(passed) = load_passed(release) {
+        eprintln!("Checking the saved bootstrap proof for this release...");
         let execution = header(execution_block)?;
         if passed.admits(
             block_height(&execution, execution_block)?,
             current_project,
-            owner,
+            release.owner(),
         ) {
+            eprintln!("Release bootstrap verified using the saved proof.");
             return Ok(());
         }
     }
+    eprintln!("Verifying release bootstrap history; first use can take a few minutes...");
     let passed = prove(release, execution_block, current_project)?;
     store_passed(release, &passed);
+    eprintln!("Release bootstrap history verified.");
     Ok(())
 }
 
@@ -99,7 +95,7 @@ impl Passed {
 
 /// `~/.cache/discovery/bootstrap-<sha256 of the rules and release entry>.json`.
 fn passed_path(release: &Release) -> Option<std::path::PathBuf> {
-    let name = passed_filename(release, BOOTSTRAP_RULES)?;
+    let name = passed_filename(release, BOOTSTRAP_RULES);
     let home = std::env::var_os("HOME")?;
     Some(
         std::path::Path::new(&home)
@@ -108,8 +104,8 @@ fn passed_path(release: &Release) -> Option<std::path::PathBuf> {
     )
 }
 
-fn passed_filename(release: &Release, rules: &str) -> Option<String> {
-    let proof = release.bootstrap.as_ref()?;
+fn passed_filename(release: &Release, rules: &str) -> String {
+    let proof = &release.bootstrap;
     let entry = [
         rules,
         release.project.as_str(),
@@ -121,10 +117,10 @@ fn passed_filename(release: &Release, rules: &str) -> Option<String> {
         &proof.lock_tx,
     ]
     .join("\n");
-    Some(format!(
+    format!(
         "bootstrap-{}.json",
         hex::encode(discovery_protocol::sha256(entry.as_bytes()))
-    ))
+    )
 }
 
 fn load_passed(release: &Release) -> Option<Passed> {
@@ -142,14 +138,17 @@ fn store_passed(release: &Release, passed: &Passed) {
 }
 
 fn prove(release: &Release, execution_block: &str, current_project: &Value) -> Result<Passed> {
-    let (proof, owner, _, parent) = identity(release)?;
+    let (proof, owner, parent) = (&release.bootstrap, release.owner(), release.parent());
+    eprintln!("Checking release owner creation...");
     let owner_init = load_stage(rpc::tx(&proof.owner_init_tx, parent)?, owner, owner, true)?;
+    eprintln!("Checking project creation...");
     let project_init = load_stage(
         rpc::tx(&proof.project_init_tx, owner)?,
         CONTRACT,
         owner,
         false,
     )?;
+    eprintln!("Checking owner key deletion...");
     let lock = load_stage(rpc::tx(&proof.lock_tx, owner)?, owner, owner, true)?;
     let previous = string(&lock.header["prev_hash"], "lock block has no parent")?;
     let evidence = Evidence {
@@ -182,7 +181,8 @@ fn header(block: &str) -> Result<Value> {
 fn load_owner_history(owner: &str, creation: &Value, seed: &str) -> Result<Vec<(Value, Value)>> {
     let mut block = creation.clone();
     let mut history = Vec::new();
-    for _ in 0..=MAX_OWNER_CREATION_BLOCKS {
+    for index in 0..=MAX_OWNER_CREATION_BLOCKS {
+        eprintln!("Checking release owner history, block {}...", index + 1);
         let hash = string(&block["hash"], "owner history block has no hash")?;
         let changes = rpc::call(
             "EXPERIMENTAL_changes",
@@ -246,7 +246,8 @@ fn validate(
     current_project: &Value,
     e: &Evidence,
 ) -> Result<()> {
-    let (proof, owner, name, parent) = identity(release)?;
+    let proof = &release.bootstrap;
+    let (owner, name, parent) = (release.owner(), release.name(), release.parent());
     let (initial_receipt, initial_block) = root(&e.owner_init.tx, owner)?;
     let (_, project_block) = root(&e.project_init.tx, CONTRACT)?;
     let (lock_receipt, lock_block) = root(&e.lock.tx, owner)?;
@@ -436,29 +437,6 @@ fn validate_owner_history(
     Ok(())
 }
 
-/// The proof, owner, project name and the owner's parent account.
-fn identity(release: &Release) -> Result<(&Bootstrap, &str, &str, &str)> {
-    let proof = release
-        .bootstrap
-        .as_ref()
-        .ok_or("release has no clean-bootstrap proof")?;
-    let (owner, name) = project_name(release)?;
-    let parent = owner
-        .split_once('.')
-        .map(|(_, parent)| parent)
-        .filter(|parent| !parent.is_empty())
-        .ok_or("bootstrap owner must be a named subaccount")?;
-    Ok((proof, owner, name, parent))
-}
-
-fn project_name(release: &Release) -> Result<(&str, &str)> {
-    release
-        .project
-        .split_once('/')
-        .filter(|(owner, name)| !owner.is_empty() && !name.is_empty() && !name.contains('/'))
-        .ok_or_else(|| "bootstrap project must be owner/name".into())
-}
-
 fn transaction<'a>(
     outcome: &'a Value,
     hash: &str,
@@ -549,7 +527,7 @@ fn signer_key_and_nonce(tx: &Value, key: &str, nonce: u64) -> Result<()> {
 }
 
 fn project_snapshot(release: &Release, current: &Value, historical: &Project) -> Result<()> {
-    let (owner, name) = project_name(release)?;
+    let (owner, name) = (release.owner(), release.name());
     let uuid = string(&current["uuid"], "release project has no UUID")?;
     if current["owner"] != owner
         || historical.value["uuid"] != uuid
@@ -607,16 +585,20 @@ mod tests {
     const N: u64 = 100_000_000;
 
     fn release() -> Release {
+        pinned(&format!("{OWNER}/discovery"), "reviewed", "lock")
+    }
+
+    fn pinned(project: &str, wasm_hash: &str, lock: &str) -> Release {
         Release {
-            project: format!("{OWNER}/discovery"),
-            wasm_hash: "reviewed".into(),
+            project: project.into(),
+            wasm_hash: wasm_hash.into(),
             organizer: "organizer.testnet".into(),
-            bootstrap: Some(Bootstrap {
+            bootstrap: Bootstrap {
                 owner_seed_block: "block-seed".into(),
                 owner_init_tx: "create-owner".into(),
                 project_init_tx: "create-project".into(),
-                lock_tx: "lock".into(),
-            }),
+                lock_tx: lock.into(),
+            },
         }
     }
 
@@ -907,7 +889,7 @@ mod tests {
         assert!(check(&e).is_err());
 
         let mut wrong_seed = release();
-        wrong_seed.bootstrap.as_mut().unwrap().owner_seed_block = "other-seed".into();
+        wrong_seed.bootstrap.owner_seed_block = "other-seed".into();
         let e = evidence();
         assert!(validate(&wrong_seed, "block-survey", &e.project_created.value, &e).is_err());
 
@@ -1014,27 +996,14 @@ mod tests {
     #[test]
     fn changing_bootstrap_rules_invalidates_the_cached_proof() {
         let release = release();
-        let current = passed_filename(&release, BOOTSTRAP_RULES).unwrap();
-        assert_eq!(current, passed_filename(&release, BOOTSTRAP_RULES).unwrap());
-        assert_ne!(
-            current,
-            passed_filename(&release, "different-rules").unwrap()
-        );
+        let current = passed_filename(&release, BOOTSTRAP_RULES);
+        assert_eq!(current, passed_filename(&release, BOOTSTRAP_RULES));
+        assert_ne!(current, passed_filename(&release, "different-rules"));
     }
 
     #[test]
     fn the_cache_is_keyed_by_every_pin_of_the_release_entry() {
-        let release = |lock: &str| Release {
-            project: "o.parent.testnet/discovery".into(),
-            wasm_hash: "h".into(),
-            organizer: "org.testnet".into(),
-            bootstrap: Some(Bootstrap {
-                owner_seed_block: "seed".into(),
-                owner_init_tx: "init".into(),
-                project_init_tx: "project".into(),
-                lock_tx: lock.into(),
-            }),
-        };
+        let release = |lock: &str| pinned("o.parent.testnet/discovery", "h", lock);
         assert_eq!(
             passed_filename(&release("lock"), BOOTSTRAP_RULES),
             passed_filename(&release("lock"), BOOTSTRAP_RULES)
@@ -1043,10 +1012,5 @@ mod tests {
             passed_filename(&release("lock"), BOOTSTRAP_RULES),
             passed_filename(&release("other-lock"), BOOTSTRAP_RULES)
         );
-        let no_proof = Release {
-            bootstrap: None,
-            ..release("lock")
-        };
-        assert!(passed_filename(&no_proof, BOOTSTRAP_RULES).is_none());
     }
 }

@@ -43,7 +43,7 @@ approval for the definition, its cost and publication.
 | `target` | the existing issue the report is about; pass the same value as `--target` |
 | `deadline_ns` | earliest finalization, in NEAR block nanoseconds; five days: `echo $(( ($(date +%s) + 5*86400) * 1000000000 ))` |
 | `questions` | 2–5 recommended, unique `id`s; ask about experience and needs, not identity |
-| `rules.no_direct_quotes` | `true` forbids quoting even publishable answers and makes withholding much more likely ([evidence](../../docs/release.md#release-evidence)), so use it only when quoting is unacceptable |
+| `rules.no_direct_quotes` | `true` forbids quoting even publishable answers and makes withholding much more likely ([evidence](../../docs/release-evidence.md)), so use it only when quoting is unacceptable |
 | `rules.withheld_terms` | public substrings to keep out of the report; never put private names here |
 
 The whole definition is public and fixed at creation; its hash is the survey id.
@@ -78,6 +78,17 @@ transaction hash and the output's `survey_id`, then verify before announcing:
 ```bash
 discovery verify <survey> --init-tx <init_tx> --target OWNER/REPO#NUMBER
 gh issue comment NUMBER --repo OWNER/REPO --body-file announcement.md
+```
+
+To invite people beyond the issue, render the invitation page instead of
+filling values by hand. Use a clean tracked checkout with the canonical
+MultiAgency/discovery `origin` URL, fetch origin and confirm `HEAD` is published.
+The script checks cached origin branch reachability; it does not refresh refs.
+It verifies the survey now (a paid status call), and takes its questions,
+deadline and restrictions from the authenticated definition:
+
+```bash
+scripts/invitation.sh <survey> <init_tx> OWNER/REPO#NUMBER "$(git rev-parse HEAD)" <page URL> > invitation.md
 ```
 
 The announcement includes the questions and a link to the service policy. It

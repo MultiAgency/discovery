@@ -73,18 +73,12 @@ of admitted responses still succeed.
 Identical submissions that race, or a retry after an interrupted submission,
 may use another place each time; they still contribute once.
 
-The limit comes from storage, not the model. On testnet, OutLayer failed
-finalization runs on their 126th storage call, which hung until the 30-second
-client timeout; the cause is unresolved. Finalization costs 7 storage calls
-plus 3 per registration, or 5 for a slot whose delayed writer inserts while it
-is being frozen, plus 2 for each closing attempt lost to a concurrent
-registration (at most 7). At 18 registrations one finalizer needs 61 calls, 97
-if every slot races, and 111 if registrations also contend with closing. The
-release aimed for a 100-call budget, a quarter below that failure, which only
-the uncontended cases meet. A second finalizer racing the first adds calls
-only after the report is stored, so a failed run only leaves cleanup for a
-retry. Finalization makes up to six model requests (three drafts, three audits)
-in one 180-second job.
+The limit comes from storage, not the model: OutLayer runs failed on their
+126th storage call on testnet, and finalization's storage work grows with
+registrations (see `REGISTRATIONS` in `crates/module/src/collection.rs` and the
+[release evidence](release-evidence.md)). A failed finalization can be retried;
+once a report is stored, a retry only resumes cleanup. Finalization makes up to
+six model requests (three drafts, three audits) in one 180-second job.
 
 Flooding with the public payment key can fill the survey early instead of
 admitting an unbounded batch that blocks finalization. Recover by creating a new

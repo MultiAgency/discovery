@@ -283,7 +283,6 @@ fn is_identifier(t: &str) -> bool {
 mod tests {
     use super::*;
     use discovery_protocol::definition::DisclosureRules;
-    use discovery_protocol::response::{Answer, Basis};
 
     fn definition(rules: DisclosureRules) -> SurveyDefinition {
         SurveyDefinition {
@@ -293,20 +292,13 @@ mod tests {
     }
 
     fn response(disclosure: Disclosure, text: &str) -> Response {
-        Response {
-            answers: vec![Answer {
-                question_id: "q".into(),
-                basis: Basis::Observed,
-                disclosure,
-                text: text.into(),
-            }],
-        }
+        crate::survey::fixtures::response(Basis::Observed, disclosure, text)
     }
 
     const SECRET: &str = "I maintain the only Rust bindings for Velvet and the installer called \
         northwind.dev twice, logging request 9f3a2b1c4d5e6f708192a3b4c5d6e7f8 to /Users/ana/agent/log.txt";
 
-    const PUBLIC: &str = "setup should list every missing variable before any network call";
+    const PUBLIC: &str = "setup should name the missing variable before any network call";
 
     fn material(rules: DisclosureRules) -> Material {
         let ctx = Disclosure::ContextOnly {
@@ -407,10 +399,8 @@ mod tests {
     /// rule to deployed reports; several were published by survey 32fac7cf….
     #[test]
     fn respondent_counts_fail_in_any_form() {
-        let phrases: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../scripts/synthetic/count-phrases.json"
-        ))
-        .unwrap();
+        let phrases: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/count-phrases.json")).unwrap();
         let list =
             |kind: &str| -> Vec<String> { serde_json::from_value(phrases[kind].clone()).unwrap() };
         let m = material(DisclosureRules::default());
