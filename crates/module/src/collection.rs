@@ -24,8 +24,8 @@ const RETRIES: usize = 8;
 /// Registrations one survey admits. A run must stay at or under 100 storage
 /// calls: 125 succeeded on testnet and the 126th failed, so a quarter stays in
 /// reserve. Finalization costs 7 calls plus 3 per registration, or 5 for a slot
-/// whose delayed writer inserts while it is being frozen; 18 keeps even every
-/// slot racing within 97. Registrations, not distinct responses, are counted,
+/// whose delayed writer inserts while it is being frozen; 18 keeps one finalizer
+/// within 97 even if every slot races (a competing one adds calls after the report is stored). Registrations, not distinct responses, are counted,
 /// because each costs finalization the same work: racing identical submissions
 /// and interrupted ones each use a place.
 pub const REGISTRATIONS: u64 = 18;

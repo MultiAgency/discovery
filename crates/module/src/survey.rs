@@ -3,9 +3,9 @@
 //! Storage layout (raw records, every value sealed under the project key):
 //! - `s/{id}/def`: the canonical survey definition
 //! - `s/{id}/key`: X25519 secret, replaced with an empty marker after release
-//! - `s/{id}/collection`: admission state and immutable registration-list head
+//! - `s/{id}/collection`: admission state and the registration-list head, fixed at close
 //! - `s/{id}/report`: the released report
-//! - `s/{id}/r/{hex mac(id:response hash)}`: open/frozen response slot, then empty tombstone
+//! - `s/{id}/r/{hex mac(id:response hash)}`: open response slot, later an empty fence
 //! - `s/{id}/i/{random}`: sealed registration metadata, no response content
 //!
 //! `{id}` is the hex definition hash, which is public. Response keys reveal

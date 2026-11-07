@@ -183,6 +183,8 @@ released candidate to pass the smoke test after its lock.
   | release candidate `d6b8f058` | allowed (demo default) | 9 | 0 | 1 |
   | release candidate `d6b8f058` | forbidden | 5 | 4 | 1 |
   | release candidate `8b3e8333` | allowed (demo default) | 9 | 1 | 0 |
+  | release candidate `214ed628` | allowed (demo default) | 9 | 1 | 0 |
+  | release candidate `214ed628` | forbidden | 6 | 4 | 0 |
 
   In those runs, the locked build's drafts kept stating counts ("one
   respondent") and reusing answer wording, and the count check flagged real
@@ -202,6 +204,18 @@ released candidate to pass the smoke test after its lock.
   the identical output in 8 s (tx `A1WXnbhhjwzKWQPQfub63V2hpqsh6Tx3aJ6Xww5uzeeh`),
   and the survey closed with its key gone. It does not show how the demo
   setting (quotes allowed) behaves at full capacity.
+- **Release candidate `214ed628`, full-capacity run on
+  `test3.research.agency.testnet/discovery`** (unlocked, sole version; quotes of
+  publishable answers allowed, as in the demo; one withheld term): 18 of 18
+  near-maximum responses accepted, a 19th distinct one refused as full, a
+  resend accepted; status reported `full: true` while open. Finalization
+  **released** a report with 7 findings and 3 acceptance-criteria changes in
+  100 s of the 180 s limit (tx `2Ef2yyA41JFDvZK3zQmVCCcrEgGNCY64dk6q6fhGZQeS`).
+  It passed `smoke.sh`'s public checks and every planted-identifier, label and
+  count check; its only six-word matches are quotes of publishable answers,
+  which this survey allows. Refinalize returned the identical output (tx
+  `5BHky2krnZivxva2SK2XY7NLhg6JUQFtCXzZCUBQMqrv`); the survey then showed
+  closed with its key gone and refused a late submission.
 - **Peak storage calls** are known only from local tests: 61 for 18 stored
   responses and 97 in the worst case, within the 100-call budget below the
   126th call at which testnet runs failed.
