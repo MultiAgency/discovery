@@ -58,6 +58,19 @@ enum Command {
         init_tx: String,
     },
     /// Verify, encrypt and submit `answers.json`.
+    ///
+    /// Normally your agent drafts the file with
+    /// `skills/discovery-respondent/SKILL.md` and shows it to you before
+    /// submitting. The format, one entry per answer:
+    ///
+    /// {"answers": [{"question_id": "<id from verify>",
+    ///   "basis": "confirmed" | "observed" | "interpretation",
+    ///   "disclosure": {"tier": "publishable"}
+    ///              | {"tier": "context_only", "phrasing": "<optional safe wording>"},
+    ///   "text": "<your answer>"}]}
+    ///
+    /// At most 4,092 bytes. Submissions are immutable; an identical retry counts once.
+    #[command(verbatim_doc_comment)]
     Submit {
         survey_id: String,
         #[arg(long)]
@@ -272,7 +285,8 @@ fn read_definition(path: &PathBuf, expected: Option<&str>) -> Result<(String, Va
 /// verified definition.
 fn read_answers(path: &PathBuf) -> Result<Response> {
     let bytes = fs::read(path).map_err(|_| "cannot read answers file")?;
-    let response: Response = serde_json::from_slice(&bytes).map_err(|_| "invalid answers JSON")?;
+    let response: Response = serde_json::from_slice(&bytes)
+        .map_err(|_| "invalid answers JSON; see `discovery submit --help` for the format")?;
     response
         .validate_answers()
         .map_err(|_| "answers need at least one answer, and no blank text or phrasing")?;
@@ -401,11 +415,21 @@ fn run(cli: &Cli) -> Result<()> {
             if state.definition != survey.definition {
                 return Err("OutLayer reports a different definition than the chain".into());
             }
+            let accepting = state.key_present && !state.closed && !state.full;
+            if accepting {
+                eprintln!(
+                    "Next: have your agent draft answers.json with \
+                     skills/discovery-respondent/SKILL.md (format: `discovery submit --help`), \
+                     approve the exact answers, then run `discovery submit {survey_id} \
+                     --init-tx {init_tx} answers.json`. The deadline is the earliest \
+                     finalization time; answers count until finalization starts."
+                );
+            }
             print(&json!({
                 "survey_id": survey_id,
                 "release": release.wasm_hash,
                 "definition": survey.definition,
-                "accepting_responses": state.key_present && !state.closed && !state.full,
+                "accepting_responses": accepting,
                 "closed": state.closed,
                 "full": state.full,
                 "key_present": state.key_present,

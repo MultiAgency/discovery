@@ -487,9 +487,16 @@ pub(crate) mod rpc {
             }
             match request.send_json(&body) {
                 Err(ureq::Error::Status(429 | 500..=599, _) | ureq::Error::Transport(_))
-                    if attempt < 4 =>
+                    if attempt < 6 =>
                 {
                     std::thread::sleep(std::time::Duration::from_secs(5 * attempt));
+                }
+                Err(ureq::Error::Status(429, _)) => {
+                    return Err(
+                        "the archival RPC is rate-limiting this machine; wait a minute \
+                        and retry, or set FASTNEAR_API_KEY"
+                            .into(),
+                    )
                 }
                 result => break result?.into_json()?,
             }
