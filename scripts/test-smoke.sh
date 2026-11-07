@@ -119,6 +119,10 @@ for (( i = 0; i < $(jq '.counted | length' "$phrases"); i++ )); do
   jq -r ".counted[$i]" "$phrases" > "$report"
   expect "a respondent count fails: $(jq -c ".counted[$i]" "$phrases")" fails check_public "$report"
 done
+# A deployed report (survey 0215b5db…): the model name's "5.3" must not pair
+# with "Respondents" in the next paragraph.
+printf 'Survey 0215b5db25ca · model z-ai/glm-5.3-flash\n\nRespondents have not provided any surfaceable evidence.\n' > "$report"
+expect "a count never spans paragraphs" succeeds check_public "$report"
 while IFS= read -r uncounted; do
   printf '%s\n' "$uncounted" > "$report"
   expect "no respondent count passes: $uncounted" succeeds check_public "$report"

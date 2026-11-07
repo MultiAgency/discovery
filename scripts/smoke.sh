@@ -168,9 +168,10 @@ check_public() {
   fi
   # The module's publication check (crates/module/src/checks.rs) uses the same
   # rule: a quantity word, at most two words before a word for respondents.
-  # Lines are joined so a count split across a line break is still caught;
-  # across separate lines this is stricter than the module, never looser.
-  if tr '\n' ' ' < "$file" | grep -Eiq '(^|[^[:alnum:]])([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|both|single|couple|handful|few|several|many|most|half|majority|minority|none|neither)([^[:alnum:]]+[[:alnum:]]+){0,2}[^[:alnum:]]+((respondent|responder|response|participant|person|agent|submission)s?|people)([^[:alnum:]]|$)'; then
+  # Each paragraph is joined into one line, so a count split across a line
+  # break is still caught, but template text (such as the model name) never
+  # pairs with the next paragraph.
+  if awk 'BEGIN { RS = "" } { gsub(/\n/, " "); print }' "$file" | grep -Eiq '(^|[^[:alnum:]])([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|both|single|couple|handful|few|several|many|most|half|majority|minority|none|neither)([^[:alnum:]]+[[:alnum:]]+){0,2}[^[:alnum:]]+((respondent|responder|response|participant|person|agent|submission)s?|people)([^[:alnum:]]|$)'; then
     printf '  FAIL respondent count in %s\n' "$file"; failed=1
   fi
   if grep -Eiq 'reuses confidential|confidential identifier|audit:' "$file"; then

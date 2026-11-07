@@ -23,19 +23,23 @@ key.
 
 **Live use is not ready.**
 
-- [releases.json](releases.json) registers no service, so the CLI refuses live use.
+- [releases.json](releases.json) registers the locked release below; the CLI
+  verifies against it.
 - **Count check:** a respondent count in any public report field (for example
   "two human respondents", "most responses") is a publication-check violation
   in `crates/module/src/checks.rs`, retried and then withheld like any other.
   It catches phrasing, not every semantic count. An earlier build (`286161a4`)
   lacked it and released a report stating counts.
-- **Shown on testnet, unlocked:** build
+- **Locked on testnet:** build
   `be2b43ef74ed103e81067e715c425766058291b79f10777b2f835143cd9f56a6`, which
   contains the count check, is the only version of
-  `test2.research.agency.testnet/discovery`.
-  - A synthetic survey filled all 18 registrations with near-maximum responses.
-    A 19th distinct response got "survey is full", and a resend of an
-    admitted one was accepted.
+  `test2.research.agency.testnet/discovery`. The owner's last access key was
+  deleted in tx `4EBFKYzTCSveqo3jHGARc5dujZz8Mu8r7mVqFM8Kfsrw`, and the owner
+  has no contract code. Before the lock, a synthetic full-capacity run on that
+  build showed:
+  - All 18 registrations filled with near-maximum responses. A 19th distinct
+    response got "survey is full", and a resend of an admitted one was
+    accepted.
   - The first finalization failed on a model-provider error and stored
     nothing. The retry released a report in 73 s of the 180 s limit, which
     is useful headroom for that run, not a guarantee for every synthesis.
@@ -43,15 +47,26 @@ key.
     quotes, source labels or respondent counts).
   - Refinalizing returned the identical report in 8 s. The survey then showed
     closed with its key gone, and refused a late submission.
-- **Still required:** only a reviewed release containing the count check may
-  be locked. Lock the release owner (delete its access keys) while the build is
-  the project's only version, register it in `releases.json`, then run the
-  [synthetic smoke test](docs/release.md#synthetic-smoke-test) against the
-  locked release. `verify` and `report` refuse unlocked releases and surveys
-  created before the lock, so no deployed run has passed CLI verification yet.
-  Peak storage calls are known only from local tests: 62 for 18 stored
-  responses and 98 in the worst case, below the 126th call at which testnet
-  runs failed.
+- **Synthetic smoke test against the locked release** (2026-11-06):
+  - `discovery verify` and `report` accepted the release and every report
+    below. Early finalization was refused, and an identical retry and an
+    after-deadline submission were accepted.
+  - **main** (3 mixed-tier responses): **withheld**, because every draft failed
+    the publication checks (tx `EgT3B2EUub9Zv8ipgoCaaNqxzf1L4TX4cPjCWKNHxE1E`).
+    The reasons stay private, so the cause is unknown. Refinalize returned the
+    identical report, and the survey closed with its key replaced.
+  - **quiet2** (context-only, no phrasings): released with no findings (tx
+    `4rU8xsdjr2pgzsC3tZL9ByxZyj9LmEZAShyqyNyw4v9G`).
+  - **load** (all 18 registrations; a 19th distinct response got "survey is
+    full"): released in 34 s with one grounded acceptance-criterion change (tx
+    `7M1v1ahG6D8Pz1bGiabrCJEi5jgQMQzigq3okLdwHY7`). Refinalize returned the
+    identical report, and the survey closed with its key replaced.
+  - Every public report passed the smoke test's checks.
+- **Still required:** find out why the small mixed survey was withheld before
+  inviting real participants. One unconfirmed possibility is a count-check
+  false positive on wording about agents ("many agents"). Peak storage calls are known only from local
+  tests: 62 for 18 stored responses and 98 in the worst case, below the 126th
+  call at which testnet runs failed.
 
 ## Quick start
 
