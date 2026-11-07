@@ -22,16 +22,16 @@ key.
 
 ## Readiness
 
-**Ready for a first private trial; no real survey is open yet.**
+**A first real survey is open on
+[MultiAgency/discovery#1](https://github.com/MultiAgency/discovery/issues/1).**
 
 - [releases.json](releases.json) registers locked release `4adb3f91` with a
   verified clean bootstrap. Its post-lock synthetic smoke test passed,
   including deployed NEAR AI E2EE v3.
 - The deployed service and this source can differ: see
   [deployed service and source](docs/release.md#deployed-service-and-source).
-- Before inviting anyone: create the real survey, render the
-  [invitation](docs/invitation.md) with `scripts/invitation.sh`, and have a
-  teammate rehearse it from a clean machine
+- Before inviting anyone: render the [invitation](docs/invitation.md) with
+  `scripts/invitation.sh` and have a teammate rehearse it from a clean machine
   ([runbook](docs/demo.md#runbook)).
 - The first `discovery verify` or `submit` on a machine checks the release's
   bootstrap proof (about 43 archival RPC calls; tens of seconds on FastNEAR's
