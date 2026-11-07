@@ -131,7 +131,7 @@ pub fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
         return err("padded length is wrong");
     }
     let len = u32::from_le_bytes(padded[..4].try_into().expect("4 bytes")) as usize;
-    if 4 + len > padded.len() || padded[4 + len..].iter().any(|b| *b != 0) {
+    if len > MAX_RESPONSE || padded[4 + len..].iter().any(|b| *b != 0) {
         return err("bad padding");
     }
     Ok(padded[4..4 + len].to_vec())
@@ -177,6 +177,26 @@ mod tests {
         let mut p = pad(b"abc").unwrap();
         p[10] = 1;
         assert!(unpad(&p).is_err());
+    }
+
+    #[test]
+    fn padding_round_trips_boundary_lengths() {
+        for len in [0, 1, MAX_RESPONSE] {
+            let data = vec![b'x'; len];
+            assert_eq!(unpad(&pad(&data).unwrap()).unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn malformed_padding_lengths_are_refused() {
+        for len in [MAX_RESPONSE as u32 + 1, u32::MAX - 3, u32::MAX] {
+            let mut padded = vec![0; PADDED];
+            padded[..4].copy_from_slice(&len.to_le_bytes());
+            assert!(unpad(&padded).is_err());
+        }
+        assert!(unpad(&[]).is_err());
+        assert!(unpad(&vec![0; PADDED - 1]).is_err());
+        assert!(unpad(&vec![0; PADDED + 1]).is_err());
     }
 
     #[test]
