@@ -38,8 +38,8 @@ use crate::finalize::Llm;
 pub const MODEL: &str = "z-ai/glm-5.3-flash";
 /// GLM-5.3 Flash reasons by default and reasoning counts toward the reply
 /// limit; "low" keeps answers complete (docs.near.ai/cloud/reasoning-models).
-const EFFORT: &str = "low";
-const MAX_TOKENS: u64 = 8192;
+pub(crate) const EFFORT: &str = "low";
+pub(crate) const MAX_TOKENS: u64 = 8192;
 
 /// An attested, end-to-end encrypted connection, opened on first use.
 pub struct Confidential {
@@ -79,11 +79,7 @@ impl Llm for Confidential {
 
     fn json(&self, system: &str, user: &str) -> Result<Value> {
         let (api, model_key) = self.connection()?;
-        let system = format!("{system}\n\nReply with one JSON object and nothing else.");
-        let messages = [
-            json!({ "role": "system", "content": system }),
-            json!({ "role": "user", "content": user }),
-        ];
+        let messages = messages(system, user);
         let session = e2ee::Session::new(model_key).map_err(fail("session"))?;
         let reply = api
             .signed_turn(MODEL, &session, &messages, EFFORT, MAX_TOKENS)
@@ -92,10 +88,19 @@ impl Llm for Confidential {
     }
 }
 
+/// The chat messages for one turn.
+pub(crate) fn messages(system: &str, user: &str) -> [Value; 2] {
+    let system = format!("{system}\n\nReply with one JSON object and nothing else.");
+    [
+        json!({ "role": "system", "content": system }),
+        json!({ "role": "user", "content": user }),
+    ]
+}
+
 /// Malformed or empty model output follows the synthesis retry/withhold path.
 /// Never return a JSON parser error that could quote confidential reply text.
 /// The deployed model sometimes wraps its JSON in one Markdown code fence.
-fn parse_reply(content: &str) -> Value {
+pub(crate) fn parse_reply(content: &str) -> Value {
     let content = content.trim();
     let unfenced = content
         .strip_prefix("```json")

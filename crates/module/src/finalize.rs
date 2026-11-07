@@ -207,7 +207,7 @@ fn publishable_body(draft: Draft, prepared: &Prepared<'_>) -> (Body, Vec<String>
 
 fn synthesis_prompt(d: &SurveyDefinition) -> String {
     let quotes = if d.rules.no_direct_quotes {
-        "Never quote respondents: reword paraphrase_only text completely. No six consecutive words may match any answer."
+        "Never quote respondents. Restate every paraphrase_only item entirely in your own words, with different sentence structure and vocabulary: no six consecutive words may match any answer (may_surface_as phrasings excepted), not even common phrases."
     } else {
         "You may paraphrase publishable text; short quotes are allowed."
     };
@@ -218,9 +218,9 @@ Rules:\n\
 - {quotes}\n\
 - A context_only item may be used only through its may_surface_as phrasing. If may_surface_as is null, the item may inform your judgment but must not be stated or hinted at. Never reuse wording from raw_context: paraphrase it completely.\n\
 - Never include names, accounts, addresses, paths, hashes, URLs or numbers from context_only material.\n\
-- Every finding needs source_ids referring to authorized answer source_id values. References are private and removed from the report. Never put these labels in public text. Every finding must cite at least one authorized source.\n\
+- Every finding needs source_ids referring to authorized answer source_id values. An answer is authorized if its tier is publishable, or if it is context_only with a non-null may_surface_as; never cite any other answer, and never invent a source_id. References are private and removed from the report. Never put these labels in public text. Every finding must cite at least one authorized source.\n\
 - Keep human confirmation, agent observation and interpretation separate; do not promote an interpretation into an observation.\n\
-- Weigh findings by evidence, not by how many respondents said something. Do not state respondent counts.\n\
+- Weigh findings by evidence, not by how many respondents said something. Never state or imply how many respondents, participants, agents or responses said something: no numbers or quantity words before them, as in \"one respondent\", \"at least one participant\", \"several agents\" or \"most responses\". Write \"A reported obstacle is…\" or \"Some setups…\" instead.\n\
 - Describe positions, never respondents: don't use the R1, R2 labels or attribute views to individuals.\n\
 - Preserve disagreement, uncertainty, affected workflows and desired outcomes. Explain implications for the issue; propose acceptance-criteria changes only where the evidence supports them.\n\n{REPORT_FORMAT}"
     )
@@ -738,5 +738,169 @@ mod tests {
         let draft = body("S1.1 reported a setup failure.");
         let report = finalize(&after_deadline(&m), &Fake::new(vec![draft; ATTEMPTS]), &id).unwrap();
         assert_eq!(report.status, Status::Withheld);
+    }
+
+    /// Diagnosis, not a check; needs the real model:
+    /// `NEARAI_API_KEY=… RUNS=10 [QUOTES=0|1] cargo test -p discovery-module live_synthesis -- --ignored --nocapture`.
+    /// Runs the smoke test's main survey (answers1–3, with the definition's quote
+    /// rule unless `QUOTES` overrides it) through `synthesize_checked` with the deployed model
+    /// and settings, over NEAR AI's plain HTTPS API: no attestation or E2EE,
+    /// which do not change what the model writes. Prints every draft's
+    /// rejection reasons and audit verdict locally.
+    #[test]
+    #[ignore]
+    fn live_synthesis_rejection_reasons() {
+        use crate::nearai::{messages, parse_reply, EFFORT, MAX_TOKENS, MODEL};
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        /// Each draft's reply, and the audit verdict on it when one ran.
+        struct Plain {
+            key: String,
+            drafts: RefCell<Vec<(Value, Option<Value>)>>,
+        }
+        impl Llm for Plain {
+            fn model(&self) -> &str {
+                MODEL
+            }
+            fn json(&self, system: &str, user: &str) -> Result<Value> {
+                let body = json!({ "model": MODEL, "max_tokens": MAX_TOKENS, "reasoning_effort": EFFORT,
+                    "messages": messages(system, user) });
+                // Config (with the key) and body both go in on stdin, never on
+                // the command line or disk.
+                let mut curl = Command::new("curl")
+                    .args([
+                        "-sS",
+                        "-f",
+                        "-m",
+                        "170",
+                        "-K",
+                        "-",
+                        "https://cloud-api.near.ai/v1/chat/completions",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let config = format!(
+                    "header = \"authorization: Bearer {}\"\nheader = \"content-type: application/json\"\ndata-binary = {}\n",
+                    self.key,
+                    serde_json::to_string(&body.to_string()).unwrap()
+                );
+                curl.stdin
+                    .take()
+                    .unwrap()
+                    .write_all(config.as_bytes())
+                    .unwrap();
+                let output = curl.wait_with_output().unwrap();
+                if !output.status.success() {
+                    return Err(Error(format!(
+                        "provider: curl {}: {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                let out: Value = serde_json::from_slice(&output.stdout)
+                    .map_err(|_| Error("provider: no JSON from NEAR AI".into()))?;
+                let choice = &out["choices"][0];
+                let content = choice["message"]["content"]
+                    .as_str()
+                    .ok_or_else(|| Error(format!("provider: no reply: {}", out["error"])))?;
+                let reply = parse_reply(content);
+                if reply.is_null() {
+                    println!(
+                        "    unparseable reply: finish_reason {}, {} chars",
+                        choice["finish_reason"],
+                        content.len()
+                    );
+                }
+                let mut drafts = self.drafts.borrow_mut();
+                if is_audit(system) {
+                    if let Some(last) = drafts.last_mut() {
+                        last.1 = Some(reply.clone());
+                    }
+                } else {
+                    drafts.push((reply.clone(), None));
+                }
+                Ok(reply)
+            }
+        }
+
+        let synthetic = |name: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../scripts/synthetic/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let mut d: SurveyDefinition = serde_json::from_str(&synthetic("definition.json")).unwrap();
+        d.title = "Smoke test main".into();
+        // The definition's rule, unless QUOTES=1 (allow) or QUOTES=0 (forbid).
+        match std::env::var("QUOTES").as_deref() {
+            Ok("1") => d.rules.no_direct_quotes = false,
+            Ok("0") => d.rules.no_direct_quotes = true,
+            _ => {}
+        }
+        let responses: Vec<Response> = ["answers1.json", "answers2.json", "answers3.json"]
+            .iter()
+            .map(|f| serde_json::from_str(&synthetic(f)).unwrap())
+            .collect();
+        let prepared = Prepared::new(&d, &responses);
+        let key = std::env::var("NEARAI_API_KEY").expect("NEARAI_API_KEY");
+        let runs: usize = std::env::var("RUNS")
+            .ok()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(5);
+        println!("no_direct_quotes = {}", d.rules.no_direct_quotes);
+        let (mut released, mut withheld, mut errors) = (0, 0, 0);
+        for run in 1..=runs {
+            let llm = Plain {
+                key: key.clone(),
+                drafts: RefCell::default(),
+            };
+            let result = synthesize_checked(&llm, &d, &responses);
+            println!(
+                "run {run}: {}",
+                match &result {
+                    Ok(Some(_)) => "released".into(),
+                    Ok(None) => "WITHHELD".into(),
+                    Err(e) => format!("error {}", e.0),
+                }
+            );
+            match &result {
+                Ok(Some(_)) => released += 1,
+                Ok(None) => withheld += 1,
+                Err(_) => errors += 1,
+            }
+            for (i, (draft, audit)) in llm.drafts.borrow().iter().enumerate() {
+                let reasons = match serde_json::from_value::<Draft>(draft.clone()) {
+                    Err(e) => vec![format!("format: {e}")],
+                    Ok(parsed) => {
+                        let (body, mut reasons) = publishable_body(parsed, &prepared);
+                        reasons.extend(prepared.material.violations(&body.strings()));
+                        reasons
+                    }
+                };
+                println!(
+                    "  draft {}: {}",
+                    i + 1,
+                    if reasons.is_empty() {
+                        "passes mechanical checks".to_string()
+                    } else {
+                        reasons.join(" | ")
+                    }
+                );
+                if let Some(audit) = audit {
+                    println!("    audit: {audit}");
+                }
+            }
+            if !matches!(result, Ok(Some(_))) {
+                if let Some((last, _)) = llm.drafts.borrow().last() {
+                    println!("  last draft: {last}");
+                }
+            }
+        }
+        println!("released {released}, withheld {withheld}, errors {errors} of {runs}");
     }
 }

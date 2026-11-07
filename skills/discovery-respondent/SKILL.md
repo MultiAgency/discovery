@@ -63,7 +63,7 @@ padding size; if the CLI says it is too large, shorten it with the owner's appro
 |---|---|---|
 | `question_id` | an id from `discovery verify` | several answers per question are fine |
 | `basis` | `confirmed`, `observed`, `interpretation` | human-confirmed, seen by you, or your reading; shown on findings |
-| `disclosure.tier` | `publishable`, `context_only` | whether the text may appear (paraphrased); omitted means context-only |
+| `disclosure.tier` | `publishable`, `context_only` | whether the text may appear (paraphrased, or in short quotes unless the survey sets `no_direct_quotes`); omitted means context-only |
 | `disclosure.phrasing` | string, `context_only` only | the only form in which this fact may appear |
 | `text` | string | the answer |
 

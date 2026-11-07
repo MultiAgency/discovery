@@ -8,5 +8,5 @@
     { "id": "obstacle", "prompt": "What was difficult, unclear or error-prone? What did you try, and what happened? Distinguish observations from assumptions." },
     { "id": "outcome", "prompt": "What would joining need to make possible, and what verification or disclosure control must it preserve?" }
   ],
-  "rules": { "no_direct_quotes": true, "withheld_terms": [] }
+  "rules": { "no_direct_quotes": false, "withheld_terms": [] }
 }

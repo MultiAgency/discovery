@@ -83,7 +83,7 @@ $s finalize load                           #    after its deadline; time the job
 ```
 
 1. **Create and verify.** `create` writes a fresh definition (deadline in
-   minutes, `no_direct_quotes: true`), records the creation transaction, checks
+   minutes, quotes of publishable answers allowed), records the creation transaction, checks
    the module output and runs `discovery verify`, which must show
    `accepting_responses: true`. `early` must return "the collection period has
    not ended".

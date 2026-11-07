@@ -157,8 +157,8 @@ next_finalize_label() {
 # Public-report checks that need no knowledge of private answers beyond the fixtures.
 check_public() {
   local file="$1" failed=0
-  # The uppercase marker only appears in a verbatim copy of a fixture; the word
-  # "synthetic" may appear legitimately, e.g. in an approved phrasing.
+  # The uppercase marker starts only context-only fixture text, which must
+  # never appear verbatim; publishable fixtures may be quoted and carry none.
   if grep -Eq 'SYNTHETIC' "$file" ||
     grep -Eiq 'example\.invalid|/home/|team-lead|88231947|10\.20\.30\.40|qa-runner' "$file"; then
     printf '  FAIL fixture text or identifier in %s\n' "$file"; failed=1
@@ -167,11 +167,12 @@ check_public() {
     printf '  FAIL private source label in %s\n' "$file"; failed=1
   fi
   # The module's publication check (crates/module/src/checks.rs) uses the same
-  # rule: a quantity word, at most two words before a word for respondents.
+  # rule: a quantity word, at most two words (three after "of") before a word
+  # for respondents.
   # Each paragraph is joined into one line, so a count split across a line
   # break is still caught, but template text (such as the model name) never
   # pairs with the next paragraph.
-  if awk 'BEGIN { RS = "" } { gsub(/\n/, " "); print }' "$file" | grep -Eiq '(^|[^[:alnum:]])([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|both|single|couple|handful|few|several|many|most|half|majority|minority|none|neither)([^[:alnum:]]+[[:alnum:]]+){0,2}[^[:alnum:]]+((respondent|responder|response|participant|person|agent|submission)s?|people)([^[:alnum:]]|$)'; then
+  if awk 'BEGIN { RS = "" } { gsub(/\n/, " "); print }' "$file" | grep -Eiq '(^|[^[:alnum:]])([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|both|single|couple|handful|few|several|many|most|half|majority|minority|none|neither)([^[:alnum:]]+of([^[:alnum:]]+[[:alnum:]]+){0,2}|([^[:alnum:]]+[[:alnum:]]+){0,2})[^[:alnum:]]+((respondent|responder|response|participant|person|agent|submission)s?|people)([^[:alnum:]]|$)'; then
     printf '  FAIL respondent count in %s\n' "$file"; failed=1
   fi
   if grep -Eiq 'reuses confidential|confidential identifier|audit:' "$file"; then
@@ -340,7 +341,7 @@ cmd_workload() {
       def fill($n): [range(0; $n) | "Synthetic workload sentence \($i)-\(.) about setup, verification and disclosure."] | join(" ");
       {answers: [
         {question_id: "workflow", basis: "observed", disclosure: {tier: "publishable"},
-         text: ("SYNTHETIC workload \($i): " + fill(16))},
+         text: ("Synthetic workload \($i): " + fill(16))},
         {question_id: "obstacle", basis: "interpretation", disclosure: {tier: "context_only", phrasing: "a synthetic workload respondent"},
          text: ("SYNTHETIC workload \($i): " + fill(16))},
         {question_id: "outcome", basis: "confirmed", disclosure: {tier: "context_only"},

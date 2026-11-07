@@ -43,7 +43,7 @@ approval for the definition, its cost and publication.
 | `target` | the existing issue the report is about; pass the same value as `--target` |
 | `deadline_ns` | earliest finalization, in NEAR block nanoseconds; five days: `echo $(( ($(date +%s) + 5*86400) * 1000000000 ))` |
 | `questions` | 2–5 recommended, unique `id`s; ask about experience and needs, not identity |
-| `rules.no_direct_quotes` | `true` forbids quoting even publishable answers |
+| `rules.no_direct_quotes` | `true` forbids quoting even publishable answers; in one synthetic batch of 10 runs on release candidate `d6b8f058`, 4 were then withheld (none with quotes allowed), so use it only when quoting is unacceptable |
 | `rules.withheld_terms` | public substrings to keep out of the report; never put private names here |
 
 The whole definition is public and fixed at creation; its hash is the survey id.

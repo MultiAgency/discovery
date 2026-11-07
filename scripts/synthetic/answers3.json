@@ -4,7 +4,7 @@
       "question_id": "workflow",
       "basis": "interpretation",
       "disclosure": { "tier": "publishable" },
-      "text": "SYNTHETIC: My agent found the survey through an issue link and had to decide on its own whether the encryption key could be trusted."
+      "text": "My agent found the survey through an issue link and had to decide on its own whether the encryption key could be trusted."
     },
     {
       "question_id": "obstacle",
@@ -16,7 +16,7 @@
       "question_id": "outcome",
       "basis": "confirmed",
       "disclosure": { "tier": "publishable" },
-      "text": "SYNTHETIC: Show me the exact answers, their basis and permissions for approval before anything is encrypted."
+      "text": "Show me the exact answers, their basis and permissions for approval before anything is encrypted."
     }
   ]
 }

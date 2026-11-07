@@ -20,8 +20,10 @@ encoded in the fixtures rather than obtained, and there are no transactions. It
 shows the protocol, not deployed confidentiality, and does not cover
 installation or CLI verification of the pinned release. It prints five steps:
 
-1. **The request.** A survey on issue #1 with three public questions and
-   `no_direct_quotes`. The whole definition is public.
+1. **The request.** A survey on issue #1 with three public questions. It
+   allows short quotes of publishable answers; in one synthetic batch of 10
+   runs, forbidding them (`no_direct_quotes`) withheld 7. The whole
+   definition is public.
 2. **Approved contributions.** Each response's permissions, without its text:
    per answer, its basis (confirmed, observed, interpretation) and how it may
    surface. The options are publishable and paraphrased, context-only through an approved phrasing,

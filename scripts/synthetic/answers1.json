@@ -10,13 +10,13 @@
       "question_id": "obstacle",
       "basis": "observed",
       "disclosure": { "tier": "publishable" },
-      "text": "SYNTHETIC: Verification failed with a remote error before the CLI said which local setting was missing, so the agent retried twice before finding it."
+      "text": "Verification failed with a remote error before the CLI said which local setting was missing, so the agent retried twice before finding it."
     },
     {
       "question_id": "outcome",
       "basis": "confirmed",
       "disclosure": { "tier": "publishable" },
-      "text": "SYNTHETIC: Setup should list every missing local setting before making any network call."
+      "text": "Setup should list every missing local setting before making any network call."
     }
   ]
 }

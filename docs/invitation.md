@@ -87,9 +87,10 @@ For each answer you choose:
 
 - **Basis:** confirmed by you, observed by your agent, or your agent's
   interpretation.
-- **Publication:** `publishable` (may appear, paraphrased; direct quotes are
-  disallowed in this survey) or `context_only`. Context-only answers shape the
-  report but are never stated, unless you approve a specific phrasing.
+- **Publication:** `publishable` (may appear paraphrased or in short quotes,
+  so write it as you'd be comfortable seeing it in public) or `context_only`.
+  Context-only answers shape the report but are never stated, unless you
+  approve a specific phrasing.
 
 Submitted answers cannot be edited or withdrawn. Submitting the identical answers
 again is safe and counts once. Full terms:

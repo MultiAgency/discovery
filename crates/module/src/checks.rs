@@ -9,7 +9,8 @@
 //!    and nowhere publishable;
 //! 3. contains a term the organizer withheld;
 //! 4. states how many responded: a quantity word followed, at most two words
-//!    later, by a word for respondents or responses ([`states_count`]). This
+//!    later (three after "of"), by a word for respondents or responses
+//!    ([`states_count`]). This
 //!    is a backstop for the prompt; it misses semantic forms ("two humans").
 
 use serde_json::{json, Value};
@@ -181,7 +182,15 @@ fn states_count(text: &str) -> Option<String> {
     (0..w.len()).find_map(|i| {
         let quantity =
             w[i].bytes().all(|b| b.is_ascii_digit()) || QUANTITIES.contains(&w[i].as_str());
-        let end = (i + 4).min(w.len());
+        // A partitive ("one of our human respondents") allows one more word.
+        // Pronoun uses ("one understood that responses…") can match too; a
+        // false positive costs a retry, a missed count would be published.
+        let gap = if w.get(i + 1).map(String::as_str) == Some("of") {
+            3
+        } else {
+            2
+        };
+        let end = (i + 2 + gap).min(w.len());
         let counted = |w: &str| COUNTED.contains(&w.strip_suffix('s').unwrap_or(w));
         let noun = (i + 1..end).find(|&j| counted(&w[j]))?;
         quantity.then(|| w[i..=noun].join(" "))

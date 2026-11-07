@@ -62,9 +62,35 @@ key.
     `7M1v1ahG6D8Pz1bGiabrCJEi5jgQMQzigq3okLdwHY7`). Refinalize returned the
     identical report, and the survey closed with its key replaced.
   - Every public report passed the smoke test's checks.
-- **Still required:** find out why the small mixed survey was withheld before
-  inviting real participants. One unconfirmed possibility is a count-check
-  false positive on wording about agents ("many agents"). Peak storage calls are known only from local
+- **Failure modes reproduced locally:** main's rejection reasons are private,
+  so its actual cause is unknown. Replaying main's three answer files through
+  the same model and checks reproduces likely causes. These are synthetic
+  batches of 10 runs per row, run locally against the live model with the
+  `live_synthesis` test in `crates/module/src/finalize.rs`; they are not
+  general release rates:
+
+  | Code | Quotes of publishable answers | Released | Withheld | Provider error |
+  |---|---|---|---|---|
+  | locked build `be2b43ef` | forbidden | 2 | 8 | 0 |
+  | locked build `be2b43ef` | allowed | 5 | 4 | 1 |
+  | release candidate `d6b8f058` | allowed (demo default) | 9 | 0 | 1 |
+  | release candidate `d6b8f058` | forbidden | 5 | 4 | 1 |
+
+  In those runs, the locked build's drafts kept stating counts ("one
+  respondent") and reusing answer wording, and the count check flagged real
+  counts. The release candidate's prompt mostly stops the counts, but
+  forbidding quotes still withholds often, because drafts reuse the product's
+  own vocabulary from publishable answers. Provider errors were transport failures between this
+  machine and NEAR AI; on-chain, such an error ends finalization, which is
+  then retried. The logs do not record a build hash: the release-candidate
+  rows rest on rebuilding the same source tree after the runs, which gave
+  `d6b8f058` again.
+- **Still required:** release candidate
+  `d6b8f0582e278e32c757456e7d4f78d317a9c217bdd3c113ecc7c8a35445e105`
+  (revised prompt and count rule; two clean builds match) goes to a new
+  project, because the locked one can't change. Demo surveys allow quotes of
+  publishable answers. It goes through the same full-capacity run, lock,
+  registration and smoke test. Peak storage calls are known only from local
   tests: 62 for 18 stored responses and 98 in the worst case, below the 126th
   call at which testnet runs failed.
 
