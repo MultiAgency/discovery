@@ -45,9 +45,14 @@ Respondents verify that key on-chain before encrypting to it.
 
 There is no anonymity promise. Distinctive approved details can identify someone.
 OutLayer's public job log shows submission counts and times under the shared
-service account. Anyone with the payment key can contribute, so counts are
-context, not proof of usage or a vote. Respondents must not announce their
-participation.
+service account. Padding gives every envelope the same size, but a
+submission's processing work still grows with its answer length (measured
+locally, about 88 WASM instructions per byte), and a resubmitted duplicate does
+less storage work than a new response. Where the log shows per-run resource use,
+it can reveal approximate length, and anyone who guesses a whole response
+exactly can tell whether it was already submitted. Anyone with the payment key
+can contribute, so counts are context, not proof of usage or a vote.
+Respondents must not announce their participation.
 
 ## Collection and retention
 
@@ -72,12 +77,14 @@ The limit comes from storage, not the model. On testnet, OutLayer failed
 finalization runs on their 126th storage call, which hung until the 30-second
 client timeout; the cause is unresolved. Finalization costs 7 storage calls
 plus 3 per registration, or 5 for a slot whose delayed writer inserts while it
-is being frozen. At 18 registrations one finalizer needs 61 calls, and 97 if
-every slot races, within a 100-call budget that keeps a quarter of reserve
-below that failure. A second finalizer racing the first can reach about 116,
-still below it; its extra calls come after the report is stored, so a failed
-run only leaves cleanup for a retry. Finalization makes up to six model requests
-(three drafts, three audits) in one 180-second job.
+is being frozen, plus 2 for each closing attempt lost to a concurrent
+registration (at most 7). At 18 registrations one finalizer needs 61 calls, 97
+if every slot races, and 111 if registrations also contend with closing. The
+release aimed for a 100-call budget, a quarter below that failure, which only
+the uncontended cases meet. A second finalizer racing the first adds calls
+only after the report is stored, so a failed run only leaves cleanup for a
+retry. Finalization makes up to six model requests (three drafts, three audits)
+in one 180-second job.
 
 Flooding with the public payment key can fill the survey early instead of
 admitting an unbounded batch that blocks finalization. Recover by creating a new

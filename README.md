@@ -29,9 +29,12 @@ key.
 - Before inviting anyone: create the real survey, fill the
   [invitation](docs/invitation.md) from its `discovery verify` output, and have
   a teammate rehearse it from a clean machine.
-- Each `discovery verify` and `submit` re-checks the bootstrap proof with about
-  85 archival RPC calls; on FastNEAR's free tier that can take minutes, and an
-  optional `FASTNEAR_API_KEY` makes it seconds.
+- The first `discovery verify` or `submit` on a machine checks the release's
+  bootstrap proof (about 43 archival RPC calls; tens of seconds on FastNEAR's
+  free tier, seconds with an optional `FASTNEAR_API_KEY`). The passed proof is
+  remembered in `~/.cache/discovery/` for that exact release, so later
+  commands make 6 archival RPC calls. Anyone who can write that folder could
+  also replace the CLI.
 - The testnet transactions, run results and local experiments are in
   [Release evidence](docs/release.md#release-evidence).
 

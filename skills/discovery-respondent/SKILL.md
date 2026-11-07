@@ -28,6 +28,12 @@ false only because `full` is true, a new response will be refused, but a retry
 of answers already submitted is still accepted. Read the questions and
 restrictions, and explain the service policy to the owner.
 
+The deadline is the earliest time the organizer may finalize, not a cutoff:
+answers are accepted until finalization starts, and `submit` reports "survey is
+closed" only once it has begun. Once the deadline passes, finalization can start
+at any time, so submit promptly after approval; never shorten the approval
+itself.
+
 ## Interview and approve
 
 Start from authorized context. Ask neutral follow-ups when needed: what they were

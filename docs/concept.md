@@ -17,7 +17,7 @@ Our first use case is GitHub issue enrichment for FOSS maintainers. Personal age
 
 ## 2. Solution
 
-An organizing agent creates a survey, personal agents contribute authorized responses, and the service analyzes them confidentially after a timed collection period. The organizer receives a report under agreed disclosure rules.
+An organizing agent creates a survey, personal agents contribute authorized responses, and the organizer finalizes the survey to close collection and start confidential analysis. The deadline is the earliest finalization time; collection stays open until finalization. The organizer receives a report under agreed disclosure rules.
 
 For GitHub issue enrichment, responses explain workflows, use cases, obstacles, workarounds, relevant personal circumstances and desired outcomes. The report is posted to the issue, where the maintainer’s existing agent uses it to refine requirements and prioritize work.
 
@@ -36,10 +36,10 @@ These are working assumptions to test through the prototype and subsequent use.
 
 The first application demonstrates the shared survey workflow through GitHub:
 
-1. **Create a request.** The maintainer agent uses the skill and CLI to publish a machine-readable survey with an associated issue, collection deadline and disclosure terms. A link is posted on GitHub.
+1. **Create a request.** The maintainer agent uses the skill and CLI to prepare a machine-readable survey with an associated issue, deadline and disclosure terms. The CLI prints unsigned creation arguments for the organizer to sign with `near`. A link is posted on GitHub.
 2. **Prepare answers.** The personal agent follows the respondent skill, draws on authorized context and interviews its human when useful. It distinguishes confirmed answers from observations or interpretations.
 3. **Submit privately.** The CLI sends the authorized response through the confidential survey service. Individual responses and participation are not posted on GitHub.
-4. **Process the batch.** After the deadline, the organizer triggers confidential processing, which synthesizes the responses and applies publication restrictions.
+4. **Process the batch.** After the deadline, the organizer finalizes the survey, closing collection and triggering confidential processing, which synthesizes the responses and applies publication restrictions.
 5. **Publish and act.** The organizer posts the verified report, or a withholding notice, on the issue. The maintainer agent considers it alongside other evidence when refining or prioritizing the work.
 
 ## 5. MVP scope
@@ -48,8 +48,8 @@ The first application demonstrates the shared survey workflow through GitHub:
 | --- | --- |
 | **Survey-organizer skill** | Guide survey design and interpretation, with maintainer research as the first application |
 | **Respondent skill** | Guide authorized disclosure, human clarification and response preparation |
-| **CLI** | Create and inspect surveys, submit responses, check status and retrieve reports |
-| **Confidential processing service** | Protect transfer and storage, manage collection windows, analyze responses and enforce publication rules |
+| **CLI** | Print unsigned creation and finalization arguments, inspect surveys, submit responses, check status and retrieve reports |
+| **Confidential processing service** | Protect transfer and storage, manage collection and finalization, analyze responses and enforce publication rules |
 | **GitHub integration** | The organizer posts survey links and verified reports on existing issues with `gh`; the service makes no GitHub calls |
 
 Survey creation, response submission and report retrieval are independent of GitHub. GitHub is the only integration demonstrated in the MVP.

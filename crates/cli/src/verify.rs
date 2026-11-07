@@ -472,7 +472,8 @@ pub(crate) mod rpc {
     pub(crate) fn call(method: &str, params: Value) -> Result<Value> {
         let body =
             json!({ "jsonrpc": "2.0", "id": "discovery", "method": method, "params": params });
-        // The public archival RPC rate-limits bursts; back off briefly. An
+        // The public archival RPC rate-limits bursts and occasionally drops a
+        // request; every call is a read, so back off briefly and retry. An
         // optional FastNEAR key raises the limit; it never changes the endpoint.
         let key = std::env::var("FASTNEAR_API_KEY")
             .ok()
@@ -485,7 +486,9 @@ pub(crate) mod rpc {
                 request = request.set("Authorization", &format!("Bearer {key}"));
             }
             match request.send_json(&body) {
-                Err(ureq::Error::Status(429, _)) if attempt < 4 => {
+                Err(ureq::Error::Status(429 | 500..=599, _) | ureq::Error::Transport(_))
+                    if attempt < 4 =>
+                {
                     std::thread::sleep(std::time::Duration::from_secs(5 * attempt));
                 }
                 result => break result?.into_json()?,

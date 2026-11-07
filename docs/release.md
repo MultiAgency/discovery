@@ -222,11 +222,11 @@ and limits, job timing, cost, and on-chain provenance as the CLI sees it.
 What each release and candidate showed, newest last. Live use waits for a
 released candidate to pass the smoke test after its lock.
 
-The unreleased security revision additionally requires E2EE v3, refuses
-contract-mediated executions, verifies complete creation inputs from signed
-transaction arguments, and verifies the clean bootstrap above. The registry is
-empty until a new deployment supplies that evidence and passes its smoke test;
-the historical runs below do not establish those new guarantees.
+Release `4adb3f91` (last entry) is the first to require E2EE v3, refuse
+contract-mediated executions, verify complete creation inputs from signed
+transaction arguments, and carry the clean bootstrap proof above. The earlier
+runs do not establish those guarantees, and the current CLI does not register
+their projects.
 
 - **Count check:** a respondent count in any public report field (for example
   "two human respondents", "most responses") is a publication-check violation
@@ -250,7 +250,7 @@ the historical runs below do not establish those new guarantees.
     quotes, source labels or respondent counts).
   - Refinalizing returned the identical report in 8 s. The survey then showed
     closed with its key gone, and refused a late submission.
-- **Synthetic smoke test against the locked release** (2026-11-06):
+- **Synthetic smoke test against locked build `be2b43ef`** (2026-11-06):
   - `discovery verify` and `report` accepted the release and every report
     below. Early finalization was refused, and an identical retry and an
     after-deadline submission were accepted.
@@ -340,7 +340,9 @@ the historical runs below do not establish those new guarantees.
     is final with a null result ("Execution promise failed") and the deposit
     refunded. A fresh finalize returned the stored report.
 - **Peak storage calls** are known only from local tests: 61 for 18 stored
-  responses and 97 in the worst case, within the 100-call budget below the
-  126th call at which testnet runs failed. Two competing finalizers can reach
-  about 116 (from review, not measured); the extra calls follow the stored
-  report, so a failure leaves only cleanup for a retry.
+  responses and 97 if every slot races, within the 100-call budget below the
+  126th call at which testnet runs failed. Registrations contending with
+  closing (7 lost attempts) raise one finalizer to 111, which exceeds the budget
+  but stays below the failure; the module's budget test does not cover that
+  case. A competing finalizer's extra calls follow the stored report, so a
+  failure leaves only cleanup for a retry.

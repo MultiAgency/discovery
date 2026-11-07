@@ -107,7 +107,7 @@ discovery submit <survey id> --init-tx <creation tx> --target MultiAgency/discov
 It verifies the survey again, encrypts the answers on your machine and prints
 "Submitted." on success. If it fails or times out, retry with the same answers:
 they count once, even if the earlier attempt was stored. "survey is full" (at
-most 18 responses) or "survey is closed" means this attempt was refused.
+most 18 registrations) or "survey is closed" means this attempt was refused.
 
 ## Privacy limits
 

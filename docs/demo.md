@@ -28,9 +28,10 @@ installation or CLI verification of the pinned release. It prints five steps:
    per answer, its basis (confirmed, observed, interpretation) and how it may
    surface. The options are publishable (paraphrased or briefly quoted), context-only through an approved phrasing,
    or context-only and never stated. Responses are encrypted to the survey key;
-   every envelope is padded to the same size, so its length doesn't reveal the
-   answer's length. A retry with identical answers gets fresh ciphertext and
-   counts once.
+   every envelope is padded to the same size, so the ciphertext doesn't reveal
+   the answer's length (processing work still does; see the
+   [policy](policy.md#disclosure)). A retry with identical answers gets fresh
+   ciphertext and counts once.
 3. **Collection closure.** The deadline is the earliest finalization time, not
    the end of collection. Finalizing early is refused before any model call,
    and a response after the deadline is still accepted.
