@@ -2,7 +2,7 @@
 # Synthetic testnet smoke test for the release registered in releases.json.
 # Every signing step is a paid call from the organizer account. Run only with
 # invented answers, after the release owner is locked: `discovery verify` and
-# `discovery report` refuse unlocked releases and surveys created before the lock.
+# `discovery report` refuse unlocked releases and initialization receipts before the lock.
 #
 #   scripts/smoke.sh create NAME [MINUTES]          new survey on TARGET, verified
 #   scripts/smoke.sh early NAME                     finalize before the deadline (must fail)
@@ -24,7 +24,11 @@ RELEASES="${RELEASES:-$REPO/releases.json}"
 WORK="${DISCOVERY_SMOKE_DIR:-$HOME/.discovery-smoke}"
 TARGET="${DISCOVERY_SMOKE_TARGET:-MultiAgency/discovery#1}"
 CONTRACT=outlayer.testnet
-RPC=https://archival-rpc.testnet.near.org
+# Archival RPC for reconciliation and the near CLI network for signing. With
+# FASTNEAR_API_KEY set, reconciliation sends it; the near CLI reads its own key
+# from the network entry named by DISCOVERY_SMOKE_NETWORK.
+RPC="${DISCOVERY_SMOKE_RPC:-https://archival-rpc.testnet.fastnear.com}"
+NETWORK="${DISCOVERY_SMOKE_NETWORK:-testnet}"
 SECOND=1000000000
 
 die() { printf 'smoke: %s\n' "$*" >&2; exit 1; }
@@ -65,7 +69,9 @@ survey_dir() {
 # tx_output HASH FAILURE_FILE: output JSON, or record a confirmed terminal failure.
 tx_output() {
   local reply
-  reply=$(curl -fsS "$RPC" -H 'content-type: application/json' \
+  local auth=()
+  [[ -z "${FASTNEAR_API_KEY:-}" ]] || auth=(-H "Authorization: Bearer $FASTNEAR_API_KEY")
+  reply=$(curl -fsS "$RPC" ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
     -d "$(jq -nc --arg h "$1" --arg s "$(organizer)" \
       '{jsonrpc: "2.0", id: "smoke", method: "tx",
         params: {tx_hash: $h, sender_account_id: $s, wait_until: "FINAL"}}')") || return 1
@@ -119,7 +125,7 @@ sign_and_send() {
   else
     near contract call-function as-transaction "$CONTRACT" request_execution \
       file-args "$request" prepaid-gas '300 Tgas' attached-deposit "$deposit" \
-      sign-as "$(organizer)" network-config testnet sign-with-legacy-keychain \
+      sign-as "$(organizer)" network-config "$NETWORK" sign-with-legacy-keychain \
       save-to-file "$signed" >&2
   fi
   hash=$(near --quiet transaction print-transaction signed \
@@ -129,7 +135,7 @@ sign_and_send() {
   grep -qs "^$label $hash\$" "$dir/transactions.log" ||
     printf '%s %s\n' "$label" "$hash" >> "$dir/transactions.log"
   near transaction send-signed-transaction file-with-base64-signed-transaction "$signed" \
-    network-config testnet send >&2 ||
+    network-config "$NETWORK" send >&2 ||
     printf '  broadcast did not confirm; reconciling %s on-chain\n' "$hash" >&2
   if ! save_output "$hash" "$dir/$label.output.json"; then
     if has_failure "$dir/$label.failure.json"; then
@@ -320,7 +326,7 @@ cmd_status() {
   dir=$(survey_dir "${1:?NAME}")
   hash=$(grep "^${2:?LABEL} " "$dir/transactions.log" | tail -n1 | cut -d' ' -f2)
   [[ -n "$hash" ]] || die "no transaction recorded for $2"
-  near transaction view-status "$hash" network-config testnet ||
+  near transaction view-status "$hash" network-config "$NETWORK" ||
     printf '  CLI status lookup failed; reconciling %s through RPC\n' "$hash" >&2
   if ! save_output "$hash" "$dir/$2.output.json"; then
     if has_failure "$dir/$2.failure.json"; then

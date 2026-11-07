@@ -5,9 +5,11 @@ personal data. Use the official
 [OutLayer CLI skill](https://skills.outlayer.ai/outlayer-cli/SKILL.md) for
 deployment, secrets and payment keys.
 
-Existing projects are immutable: new code and formats ship as a new locked
-project. `discovery` refuses a release until it is locked, and a survey
-created before the lock never verifies.
+New code and formats ship as a new locked project. `discovery` requires a clean
+bootstrap proof as well as a lock: a snapshot of the remaining versions cannot
+reveal an earlier version that was removed after planting state. Old testnet
+projects cannot supply this proof and are not registered by the current CLI.
+Initialization receipts must follow the verified lock.
 
 ## Setup
 
@@ -24,9 +26,11 @@ created before the lock never verifies.
    shasum -a 256 "$dir/release.wasm"     # the release hash; upload this file
    git ls-files -co --exclude-standard -z | tar --null -T - -czf "$dir/source.tgz"
    ```
-2. Use a fresh, initialized NEAR account as the release owner and never deploy
-   code to it. Keep only the reviewed version, then delete all of the owner's
-   access keys.
+2. Bootstrap a fresh release owner and project as described below. Upload the
+   WASM using a separate account: the release owner's only transactions must be
+   project creation followed by deleting its sole key. Record all three
+   bootstrap transaction hashes. Never deploy account code or add another
+   version, even temporarily.
 3. Use a separate funded organizer account. Give it a `nearai` secrets profile
    holding `NEARAI_API_KEY`, restricted to the reviewed build. Create the
    shared submission payment key under the same account, since the caller
@@ -37,9 +41,24 @@ created before the lock never verifies.
    [spend limit](https://docs.near.ai/api-reference/workspaces/update-api-key-spend-limit.md)
    on the NEAR AI API key itself.
 4. Set the service in `releases.json`:
-   `{"service": {"project": "<owner/project>", "release": "<wasm sha256>", "organizer": "<account>"}}`,
+
+   ```json
+   {"service": {
+     "project": "<owner/project>",
+     "release": "<wasm sha256>",
+     "organizer": "<account>",
+     "bootstrap": {
+       "owner_seed_block": "<recent finalized block hash>",
+       "owner_init_tx": "<parent creates fresh owner>",
+       "project_init_tx": "<owner creates reviewed project>",
+       "lock_tx": "<owner deletes its sole key>"
+     }
+   }}
+   ```
    then reinstall the CLI. The CLI refuses a malformed entry or an organizer
-   that is the project owner. Finish open surveys before replacing it.
+   that is the project owner, and requires all bootstrap pins. Existing public
+   reports can be retrieved using their original CLI; the hardened CLI does not
+   authenticate legacy releases without this proof.
 5. Pass the synthetic smoke test below before collecting personal data.
 
 Install the official NEAR CLI. Its legacy keychain
@@ -49,6 +68,77 @@ Install the official NEAR CLI. Its legacy keychain
 ```bash
 cargo install near-cli-rs --version 0.30.1 --locked --no-default-features
 ```
+
+## Clean bootstrap proof
+
+Choose a recent finalized block and save its hash as `owner_seed_block`. Derive
+the owner's first account label from that hash and a parent you control: take
+the first 32 lowercase hexadecimal characters of SHA-256 over the UTF-8 text
+`discovery:bootstrap-owner:v1:<owner_seed_block>:<parent>`, without a trailing
+newline. The full owner is `<label>.<parent>` and must fit NEAR's account-name
+limit. For example, after obtaining the block hash:
+
+```bash
+bootstrap_parent=release-parent.testnet
+bootstrap_seed='<recent-finalized-block-hash>'
+bootstrap_label=$(printf 'discovery:bootstrap-owner:v1:%s:%s' "$bootstrap_seed" "$bootstrap_parent" | shasum -a 256 | cut -c 1-32)
+printf '%s.%s\n' "$bootstrap_label" "$bootstrap_parent"
+```
+
+The parent creates that account in a direct transaction with exactly
+`CreateAccount`, funding via `Transfer`, and one full-access `AddKey`, in that
+order. Its creation receipt must land within 32 block heights after the seed.
+Save the transaction as `owner_init_tx` and wait for finality before the owner
+signs anything. If creation misses the window, start again with a new seed and
+owner. Faucet or factory function calls, implicit accounts, multiple keys and
+account contracts do not qualify for this proof.
+
+The owner's first transaction calls `outlayer.testnet.create_project` directly,
+with the intended project name and the reviewed `WasmUrl` source. Save it as
+`project_init_tx`, wait for finality, then have the owner send a direct
+transaction to itself containing only `DeleteKey` for that same key. Save it as
+`lock_tx` and wait for finality. Keep these steps in separate blocks. Do not
+send any other owner transactions, including transactions with a later nonce
+that might be waiting for execution when the key is deleted. Uploads, funding
+and organizer setup use other accounts.
+
+Verification walks every ancestor block from owner creation through the seed,
+checking all account changes, including intermediate changes within a block.
+Only the pinned creation receipt may change this owner. Together with the
+unpredictable block-derived name, this excludes earlier account lifetimes and
+their delayed receipts, assuming SHA-256 preimage resistance at 128 bits.
+
+Verification also checks consecutive owner nonces, the initial block's key
+changes, and key state immediately before and during the lock receipt's block.
+These checks reject hidden owner activity and higher-nonce transactions already
+accepted before key deletion. They bind the created project's UUID and source
+to the registered project at survey and report execution. Missing or incomplete
+archival evidence is a verification failure.
+
+The proof relies on OutLayer scoping storage and project-bound encryption keys
+by the project's on-chain UUID, not its `owner/name`: storage is keyed by
+`(project_uuid, account_id, key)` ([projects](https://app.outlayer.ai/docs/projects),
+[storage](https://app.outlayer.ai/docs/storage)), and "a project deleted and
+created again under the same name has new keys, and cannot open what the old
+one sealed" ([encryption keys](https://app.outlayer.ai/docs/encryption-keys)).
+The [published contract source](https://github.com/out-layer/outlayer/blob/main/contract/src/projects.rs#L72-L74)
+increments a counter before formatting each UUID. Verification relies on the
+deployed contract preserving this behavior. So a deleted and
+re-created owner or project cannot carry planted state into the release. A
+transferred project keeps its UUID, so one moved onto the release's name fails
+the UUID binding, and accepting a transfer would need an owner transaction the
+proof forbids. The manifest's `callers` block matches the worker's schema; the
+worker refuses a run whose manifest does not parse and checks the block before
+any key derivation or execution (`worker/src/callers.rs`).
+
+The module manifest allows direct NEAR calls and HTTPS and denies contract
+relays and meta-transactions. Its NEAR AI requests require E2EE v3; request AEAD
+authenticates the reply key and field label according to the
+[official inference proxy](https://github.com/nearai/inference-proxy/blob/53d504156d38a8f951933e8aa8d23b3a0f70a4df/src/encryption.rs).
+The public [E2EE guide](https://docs.near.ai/cloud/guides/e2ee-chat-completions)
+still describes v2. Source support does not prove that every serving endpoint
+has deployed v3: verify compatibility with invented data in the smoke test.
+Never work around a failure by downgrading encryption.
 
 ## Synthetic smoke test
 
@@ -131,6 +221,12 @@ and limits, job timing, cost, and on-chain provenance as the CLI sees it.
 
 What each release and candidate showed, newest last. Live use waits for a
 released candidate to pass the smoke test after its lock.
+
+The unreleased security revision additionally requires E2EE v3, refuses
+contract-mediated executions, verifies complete creation inputs from signed
+transaction arguments, and verifies the clean bootstrap above. The registry is
+empty until a new deployment supplies that evidence and passes its smoke test;
+the historical runs below do not establish those new guarantees.
 
 - **Count check:** a respondent count in any public report field (for example
   "two human respondents", "most responses") is a publication-check violation
@@ -216,6 +312,35 @@ released candidate to pass the smoke test after its lock.
   which this survey allows. Refinalize returned the identical output (tx
   `5BHky2krnZivxva2SK2XY7NLhg6JUQFtCXzZCUBQMqrv`); the survey then showed
   closed with its key gone and refused a late submission.
+- **Release `4adb3f91`, registered** (2026-11-07). Bootstrapped on the seed
+  rule from a frozen source snapshot: seed block
+  `9soPUrPWRTYQJp6JcVeBHzS26apTLeQ8TmuxDWqUR6f7`; owner
+  `ffff80798e85168e51e6f47b185a6b7c.research.agency.testnet` created 8 blocks
+  later (tx `4HA6aRC2Lx9d6TF29tTeP46QKpxBNoUZZGc571eJU49f`); project UUID
+  `p0000000000000111` (tx `7URjvSQ1v5H8CVCEFMTZDarZ7xzUmQaxEXHDbCFzA1t2`);
+  locked (tx `H82DefwCNra9QEBPHDbQBL41BqJhs6PPSLphn76UTcny`).
+  - E2EE v3 was first confirmed live on an unregistered scratch version of the
+    previous candidate (tx `BdcrgMYHBNRRn5EDNdgJo9jefLSnjixxU8baBuiGdeFD`).
+  - Pre-lock full capacity (quotes allowed): 18 accepted, a 19th distinct
+    response refused, released on the first attempt in 27 s with 6 findings
+    (tx `C9MNaG55dd6ECWFg2D4fa8sEbJPj6cfqQComGL7L4S5d`); identical refinalize;
+    cleanup confirmed. Its six-word matches all quote publishable answers.
+  - Post-lock smoke test passed: `discovery verify` accepted the bootstrap
+    proof; early finalization refused; an identical retry and an
+    after-deadline submission accepted. **main** released with three grounded
+    acceptance-criteria changes (tx `AG2oLKmRE7w4GKgaKg5QMmwy9YeDZiyfs4aApL4bvuKA`);
+    **quiet** (context-only, no phrasings) released a notice-only report (tx
+    `BRXT6CAzftiTQeZRyfUvQg33XYTLDmZEsqSbNZTphpQU`); **load** filled all 18
+    places, refused a distinct 19th and released in 46 s (tx
+    `ASWPp4n8J2CNYB1RKCMtixNUBjFQfcxsRs3NiDxAtMzm`). Refinalize returned
+    identical reports, every report passed the public checks, and each survey
+    closed with its key replaced.
+  - One finalize (tx `6mLVaoqYLhV4wdXXz2z5SXpxK8oycKjvF43Weg5cnSN8`) completed
+    in the service but its OutLayer result was not delivered: the transaction
+    is final with a null result ("Execution promise failed") and the deposit
+    refunded. A fresh finalize returned the stored report.
 - **Peak storage calls** are known only from local tests: 61 for 18 stored
   responses and 97 in the worst case, within the 100-call budget below the
-  126th call at which testnet runs failed.
+  126th call at which testnet runs failed. Two competing finalizers can reach
+  about 116 (from review, not measured); the extra calls follow the stored
+  report, so a failure leaves only cleanup for a retry.

@@ -115,6 +115,11 @@ Retries resume cleanup and return the same stored report. Optionally run
 `discovery verify` again: it should show `closed: true` and
 `key_present: false`.
 
+A final transaction whose result is null (its logs say "Execution promise
+failed") means OutLayer did not deliver the result, though the service may have
+finished: check with `discovery verify`, then finalize again; a retry returns
+the stored report.
+
 After a timeout, reconcile the original transaction before signing another paid
 attempt; never blindly sign a replacement. To keep a recovery artifact, sign
 with `save-to-file signed.json` instead of `send`, then broadcast it with

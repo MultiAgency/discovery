@@ -2,9 +2,9 @@
 //!
 //! The `InitSurvey` transaction proves, through OutLayer's contract and its
 //! TDX-attested workers, which build produced which key. The key is only
-//! safe if, at that block, the release was the project's only version and its
-//! owner was initialized, without access keys or contract code: otherwise
-//! another version could have read the key before the project was locked.
+//! safe only if a clean bootstrap proves the project could never have run
+//! another build, and the owner was already locked before survey creation.
+//! A snapshot of the remaining versions alone cannot prove that history.
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -23,6 +23,8 @@ pub struct Release {
     #[serde(rename = "release")]
     pub wasm_hash: String,
     pub organizer: String,
+    #[serde(default)]
+    pub bootstrap: Option<crate::bootstrap::Bootstrap>,
 }
 
 pub struct Verified {
@@ -92,13 +94,45 @@ pub(crate) fn execution(outcome: &Value, release: &Release) -> Result<(Value, Va
         )
         .into());
     }
-    let input: Value =
-        serde_json::from_str(request["input_data"].as_str().ok_or("no input_data")?)?;
+    let input = execution_input(action, &request, release)?;
     let completed = events(outcome, CONTRACT, "execution_completed");
     if completed.len() != 1 || completed[0].0["success"] != true {
         return Err("execution did not complete successfully exactly once".into());
     }
     Ok((input, success_value(outcome)?, block.clone()))
+}
+
+/// The signed transaction always carries the complete input. OutLayer omits
+/// large inputs from its event and removes their temporary state on completion,
+/// so verification must not depend on either copy being available later.
+fn execution_input(action: &Value, request: &Value, release: &Release) -> Result<Value> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    let args: Value = serde_json::from_slice(
+        &B64.decode(
+            action["args"]
+                .as_str()
+                .ok_or("transaction has no arguments")?,
+        )?,
+    )?;
+    let project = &args["source"]["Project"];
+    if project["project_id"] != release.project.as_str()
+        || project
+            .get("version_key")
+            .is_some_and(|version| !version.is_null() && version != release.wasm_hash.as_str())
+    {
+        return Err("transaction arguments do not request the registered project and build".into());
+    }
+    let input = args["input_data"]
+        .as_str()
+        .ok_or("transaction arguments have no input_data")?;
+    let event_input = request["input_data"].as_str().ok_or("no input_data")?;
+    match request.get("input_data_in_state") {
+        Some(Value::Bool(true)) if event_input.is_empty() => {}
+        None | Some(Value::Bool(false)) if event_input == input => {}
+        _ => return Err("execution event input does not match the signed transaction".into()),
+    }
+    Ok(serde_json::from_str(input)?)
 }
 
 /// Fetch the report from the finalized chain transaction, never the HTTPS API.
@@ -177,10 +211,10 @@ fn require_locked(release: &Release, block: &str) -> Result<()> {
     if !warnings.is_empty() {
         return Err(format!("release was not locked: {}", warnings.join("; ")).into());
     }
-    Ok(())
+    crate::bootstrap::verify(release, block, &project)
 }
 
-fn owner_is_locked(account: &Value, keys: usize) -> bool {
+pub(crate) fn owner_is_locked(account: &Value, keys: usize) -> bool {
     keys == 0
         && account["code_hash"] == "11111111111111111111111111111111"
         && account["global_contract_hash"].is_null()
@@ -220,6 +254,7 @@ mod tests {
             project: "owner/discovery".into(),
             wasm_hash: "audited".into(),
             organizer: "organizer.testnet".into(),
+            bootstrap: None,
         }
     }
 
@@ -232,9 +267,14 @@ mod tests {
     }
 
     fn outcome() -> Value {
+        let input = json!({ "operation": "finalize", "survey_id": "survey" }).to_string();
+        let args = json!({
+            "source": {"Project": {"project_id": "owner/discovery", "version_key": "audited"}},
+            "input_data": input,
+        });
         let request = json!({ "sender_id": "organizer.testnet", "project_id": "owner/discovery",
             "code_source": { "WasmUrl": { "hash": "audited" } },
-            "input_data": json!({ "operation": "finalize", "survey_id": "survey" }).to_string() });
+            "input_data": input });
         let logs = vec![
             format!(
                 "EVENT_JSON:{}",
@@ -246,9 +286,102 @@ mod tests {
             ),
         ];
         json!({ "transaction": { "signer_id": "organizer.testnet", "receiver_id": "outlayer.testnet",
-            "actions": [{ "FunctionCall": { "method_name": "request_execution" } }] },
+            "actions": [{ "FunctionCall": { "method_name": "request_execution", "args": B64.encode(args.to_string()) } }] },
             "receipts_outcome": [{ "block_hash": "block", "outcome": { "executor_id": "outlayer.testnet", "logs": logs } }],
             "status": { "SuccessValue": B64.encode(output().to_string()) } })
+    }
+
+    #[test]
+    fn large_creation_input_is_verified_from_signed_transaction_arguments() {
+        // OutLayer's event limit applies to the complete serialized module
+        // input, not just a question's text. Both sides of the boundary work.
+        for size in [9_999, 10_000, 20_000] {
+            let mut definition = json!({
+                "version": 2, "title": "Long survey", "deadline_ns": 1_800_000_000_000_000_000u64,
+                "target": {"repo": "owner/repo", "number": 1},
+                "questions": [{"id": "q", "prompt": ""}],
+                "rules": {"no_direct_quotes": false, "withheld_terms": []},
+            });
+            let base = json!({"operation": "init_survey", "definition": definition})
+                .to_string()
+                .len();
+            definition["questions"][0]["prompt"] = json!("q".repeat(size - base));
+            let input = json!({"operation": "init_survey", "definition": definition});
+            assert_eq!(input.to_string().len(), size);
+            let mut valid = outcome();
+            let mut args: Value = serde_json::from_slice(
+                &B64.decode(
+                    valid["transaction"]["actions"][0]["FunctionCall"]["args"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            args["input_data"] = json!(input.to_string());
+            valid["transaction"]["actions"][0]["FunctionCall"]["args"] =
+                json!(B64.encode(args.to_string()));
+            let log = &mut valid["receipts_outcome"][0]["outcome"]["logs"][0];
+            let mut event: Value =
+                serde_json::from_str(log.as_str().unwrap().strip_prefix("EVENT_JSON:").unwrap())
+                    .unwrap();
+            let mut request: Value =
+                serde_json::from_str(event["data"][0]["request_data"].as_str().unwrap()).unwrap();
+            request["input_data"] = json!(if size >= 10_000 {
+                String::new()
+            } else {
+                input.to_string()
+            });
+            request["input_data_in_state"] = json!(size >= 10_000);
+            event["data"][0]["request_data"] = json!(request.to_string());
+            *log = json!(format!("EVENT_JSON:{event}"));
+            assert_eq!(execution(&valid, &release()).unwrap().0, input);
+        }
+    }
+
+    #[test]
+    fn execution_input_rejects_missing_malformed_or_conflicting_arguments() {
+        let valid = outcome();
+        let action = &valid["transaction"]["actions"][0]["FunctionCall"];
+        let input = json!({"operation": "finalize", "survey_id": "survey"}).to_string();
+        let event = json!({"input_data": input});
+        let args: Value =
+            serde_json::from_slice(&B64.decode(action["args"].as_str().unwrap()).unwrap()).unwrap();
+        for bad in [
+            Value::Null,
+            json!("not base64"),
+            json!(B64.encode("not JSON")),
+            json!(B64.encode("{}")),
+        ] {
+            let mut bad_action = action.clone();
+            bad_action["args"] = bad;
+            assert!(execution_input(&bad_action, &event, &release()).is_err());
+        }
+        for field in ["project_id", "version_key"] {
+            let mut bad_args = args.clone();
+            bad_args["source"]["Project"][field] = json!("other");
+            let mut bad_action = action.clone();
+            bad_action["args"] = json!(B64.encode(bad_args.to_string()));
+            assert!(execution_input(&bad_action, &event, &release()).is_err());
+        }
+        for bad_event in [
+            json!({"input_data": "different"}),
+            json!({"input_data": "", "input_data_in_state": false}),
+            json!({"input_data": input, "input_data_in_state": true}),
+            json!({"input_data": input, "input_data_in_state": "true"}),
+        ] {
+            assert!(execution_input(action, &bad_event, &release()).is_err());
+        }
+        // Unpinned source versions remain safe only because execution() also
+        // authenticates the actual resolved build in OutLayer's event.
+        let mut unpinned = args;
+        unpinned["source"]["Project"]
+            .as_object_mut()
+            .unwrap()
+            .remove("version_key");
+        let mut unpinned_action = action.clone();
+        unpinned_action["args"] = json!(B64.encode(unpinned.to_string()));
+        assert!(execution_input(&unpinned_action, &event, &release()).is_ok());
     }
 
     #[test]
@@ -326,7 +459,7 @@ mod tests {
     }
 }
 
-mod rpc {
+pub(crate) mod rpc {
     //! Read-only NEAR JSON-RPC for release and report verification.
 
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -334,19 +467,24 @@ mod rpc {
 
     use crate::Result;
 
-    const RPC: &str = "https://archival-rpc.testnet.near.org";
+    const RPC: &str = "https://archival-rpc.testnet.fastnear.com";
 
-    fn call(method: &str, params: Value) -> Result<Value> {
+    pub(crate) fn call(method: &str, params: Value) -> Result<Value> {
         let body =
             json!({ "jsonrpc": "2.0", "id": "discovery", "method": method, "params": params });
-        // The public archival RPC rate-limits bursts; back off briefly.
+        // The public archival RPC rate-limits bursts; back off briefly. An
+        // optional FastNEAR key raises the limit; it never changes the endpoint.
+        let key = std::env::var("FASTNEAR_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
         let mut attempt = 0;
         let reply: Value = loop {
             attempt += 1;
-            match ureq::post(RPC)
-                .timeout(std::time::Duration::from_secs(30))
-                .send_json(&body)
-            {
+            let mut request = ureq::post(RPC).timeout(std::time::Duration::from_secs(30));
+            if let Some(key) = &key {
+                request = request.set("Authorization", &format!("Bearer {key}"));
+            }
+            match request.send_json(&body) {
                 Err(ureq::Error::Status(429, _)) if attempt < 4 => {
                     std::thread::sleep(std::time::Duration::from_secs(5 * attempt));
                 }

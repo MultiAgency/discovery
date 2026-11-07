@@ -21,13 +21,17 @@ key.
 
 ## Readiness
 
-**Live use is not ready.**
+**Ready for a first private trial; no real survey is open yet.**
 
-- [releases.json](releases.json) registers locked release `be2b43ef` on
-  `test2.research.agency.testnet/discovery`. It passed the synthetic smoke
-  test, but its reports withhold most small surveys.
-- A revised release is being validated on a new project before it replaces
-  that one.
+- [releases.json](releases.json) registers locked release `4adb3f91` with a
+  verified clean bootstrap. Its post-lock synthetic smoke test passed,
+  including deployed NEAR AI E2EE v3.
+- Before inviting anyone: create the real survey, fill the
+  [invitation](docs/invitation.md) from its `discovery verify` output, and have
+  a teammate rehearse it from a clean machine.
+- Each `discovery verify` and `submit` re-checks the bootstrap proof with about
+  85 archival RPC calls; on FastNEAR's free tier that can take minutes, and an
+  optional `FASTNEAR_API_KEY` makes it seconds.
 - The testnet transactions, run results and local experiments are in
   [Release evidence](docs/release.md#release-evidence).
 
@@ -56,7 +60,9 @@ cargo install --locked --path crates/cli
 
 The CLI compiles in the service from this checkout's `releases.json`; no
 announcement or option can override its project, build hash or organizer. The
-only setting is `DISCOVERY_PAYMENT_KEY`, the published submission key.
+only required setting is `DISCOVERY_PAYMENT_KEY`, the published submission key;
+`FASTNEAR_API_KEY` optionally raises the RPC rate limit without changing the
+endpoint.
 
 | Command | Who | Does |
 |---|---|---|

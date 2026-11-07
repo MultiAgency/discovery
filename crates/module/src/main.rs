@@ -57,6 +57,28 @@ fn main() {
     env::output_json(&answer).expect("serialize output");
 }
 
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+
+    #[test]
+    fn manifest_requires_direct_organizer_authority_and_allows_https_responses() {
+        let manifest: Value = serde_json::from_str(include_str!("../manifest.json")).unwrap();
+        // The worker enforces this before decrypting secrets or running code.
+        // A relaying contract retains its transaction's original signer, so
+        // accepting that door would let it close the signer's real collection.
+        assert_eq!(
+            manifest["callers"],
+            json!({
+                "direct": "allow",
+                "contract": "deny",
+                "https": "allow",
+                "meta_tx": "deny"
+            })
+        );
+    }
+}
+
 // Last, so release builds keep the same line numbers in panic locations.
 #[cfg(test)]
 mod demo;

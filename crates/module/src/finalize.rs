@@ -204,12 +204,16 @@ fn publishable_body(draft: Draft, prepared: &Prepared) -> (Body, Vec<String>) {
             })
             .collect(),
     };
-    let strings = body.strings();
-    if prepared
-        .sources
-        .keys()
-        .any(|label| strings.iter().any(|text| text.contains(label)))
-    {
+    // Source labels are ASCII; changing their case must not expose provenance.
+    let strings: Vec<_> = body
+        .strings()
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if prepared.sources.keys().any(|label| {
+        let label = label.to_ascii_lowercase();
+        strings.iter().any(|text| text.contains(&label))
+    }) {
         reasons.push("public text exposes private source references".into());
     }
     (body, reasons)
@@ -746,10 +750,55 @@ mod tests {
 
     #[test]
     fn private_source_references_in_narrative_are_rejected() {
+        for label in ["S1.1", "s1.1"] {
+            for field in [
+                "summary",
+                "finding",
+                "disagreement",
+                "open question",
+                "criterion",
+                "change",
+                "rationale",
+            ] {
+                let (m, id) = setup();
+                let mut draft = body("A language binding maintainer was affected.");
+                let text = format!("{label} reported a setup failure.");
+                match field {
+                    "summary" => draft["summary"] = json!(text),
+                    "finding" => draft["findings"][0]["statement"] = json!(text),
+                    "disagreement" => draft["disagreements"] = json!([text]),
+                    "open question" => draft["open_questions"] = json!([text]),
+                    part => {
+                        let mut criterion = json!({
+                            "criterion": "Setup",
+                            "change": "List missing settings first.",
+                            "rationale": "Remote errors come too late."
+                        });
+                        criterion[part] = json!(text);
+                        draft["acceptance_criteria"] = json!([criterion]);
+                    }
+                }
+                let llm = Fake::new(vec![draft; ATTEMPTS]);
+                let report = finalize(&after_deadline(&m), &llm, &id).unwrap();
+                assert_eq!(report.status, Status::Withheld, "{label} in {field}");
+                assert_eq!(report.body, Body::default());
+                assert!(
+                    llm.calls.borrow()[1].contains("public text exposes private source references")
+                );
+            }
+        }
+
         let (m, id) = setup();
-        let draft = body("S1.1 reported a setup failure.");
-        let report = finalize(&after_deadline(&m), &Fake::new(vec![draft; ATTEMPTS]), &id).unwrap();
-        assert_eq!(report.status, Status::Withheld);
+        let llm = Fake::new(vec![
+            body("s1.1 reported a setup failure."),
+            body("A language binding maintainer was affected."),
+        ]);
+        let report = finalize(&after_deadline(&m), &llm, &id).unwrap();
+        assert_eq!(report.status, Status::Released);
+        assert_eq!(
+            report.body.summary,
+            "A language binding maintainer was affected."
+        );
     }
 
     /// Diagnosis, not a check; needs the real model:

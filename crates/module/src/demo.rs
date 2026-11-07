@@ -126,7 +126,7 @@ fn print_permissions(name: &str, response: &Response) {
     println!("  {name}, approved permissions:");
     for a in &response.answers {
         let surfaces = match &a.disclosure {
-            Disclosure::Publishable => "publishable, paraphrased".into(),
+            Disclosure::Publishable => "publishable".into(),
             Disclosure::ContextOnly { phrasing: Some(p) } => {
                 format!("context-only, may appear only as \"{p}\"")
             }

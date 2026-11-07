@@ -4,6 +4,7 @@
 //! binary. Announcements cannot override it. Respondents verify keys against the
 //! service's creation transaction before encrypting answers.
 
+mod bootstrap;
 mod verify;
 
 use std::fs;
@@ -85,13 +86,52 @@ struct Registry {
     service: Option<Release>,
 }
 
-/// Without a registered service, live use is refused. The entry needs no
-/// further checks here: verification against the chain fails closed on a
-/// wrong project, build or organizer, or an owner that still holds keys.
+/// Refuse incomplete release pins before any network or paid request. The
+/// bootstrap transactions are checked on-chain during survey/report verification.
 fn configured_service(registry: &str) -> Result<Release> {
-    Ok(serde_json::from_str::<Registry>(registry)?
+    let release = serde_json::from_str::<Registry>(registry)?
         .service
-        .ok_or("this build registers no release (releases.json has no registered service)")?)
+        .ok_or("this build registers no release (releases.json has no registered service)")?;
+    let (owner, project) = release
+        .project
+        .split_once('/')
+        .ok_or("invalid registered project")?;
+    if !account_id(owner)
+        || project.is_empty()
+        || !project
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        || !account_id(&release.organizer)
+        || owner == release.organizer
+        || !is_hex(&release.wasm_hash, 32)
+    {
+        return Err("invalid registered project, build or organizer".into());
+    }
+    let proof = release.bootstrap.as_ref().ok_or(
+        "registered release has no clean bootstrap proof; use a newly bootstrapped release",
+    )?;
+    if !tx_hash(&proof.owner_seed_block) {
+        return Err("invalid registered bootstrap seed block".into());
+    }
+    let hashes = [&proof.owner_init_tx, &proof.project_init_tx, &proof.lock_tx];
+    if hashes.iter().any(|hash| !tx_hash(hash))
+        || hashes[0] == hashes[1]
+        || hashes[0] == hashes[2]
+        || hashes[1] == hashes[2]
+    {
+        return Err("invalid registered bootstrap transactions".into());
+    }
+    Ok(release)
+}
+
+fn account_id(id: &str) -> bool {
+    (2..=64).contains(&id.len())
+        && id.split(['.', '-', '_']).all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 fn is_hex(s: &str, bytes: usize) -> bool {
@@ -181,10 +221,14 @@ fn survey(errors: &mut Vec<String>, id: &str) {
 }
 
 fn tx(errors: &mut Vec<String>, hash: &str) {
-    const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    if !(32..=44).contains(&hash.len()) || !hash.bytes().all(|b| BASE58.contains(&b)) {
+    if !tx_hash(hash) {
         errors.push("not a NEAR transaction hash".into());
     }
+}
+
+fn tx_hash(hash: &str) -> bool {
+    const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    (32..=44).contains(&hash.len()) && hash.bytes().all(|b| BASE58.contains(&b))
 }
 
 fn payment_key<'a>(errors: &mut Vec<String>, cli: &'a Cli) -> Option<&'a str> {
@@ -261,6 +305,8 @@ fn request(release: &Release, input: Value) -> Value {
 /// HTTPS call to the module, run as the payment key's owner.
 fn call(release: &Release, key: &str, input: Value) -> Result<Value> {
     let reply: Value = ureq::post(&format!("{API}/call/{}", release.project))
+        // Allow the collection job to finish and the gateway to return its result.
+        .timeout(std::time::Duration::from_secs(120))
         .set("X-Payment-Key", key)
         .send_json(json!({ "input": input, "version_key": release.wasm_hash }))
         .map_err(|_| "service request failed; retry the identical answers if submitting")?
@@ -399,7 +445,12 @@ mod tests {
 
     fn registry(release: &str) -> String {
         json!({"service": {"project": "owner.testnet/discovery", "release": release,
-            "organizer": "organizer.testnet"}})
+        "organizer": "organizer.testnet", "bootstrap": {
+            "owner_seed_block": "4".repeat(43),
+            "owner_init_tx": "1".repeat(43),
+            "project_init_tx": "2".repeat(43),
+            "lock_tx": "3".repeat(43)
+        }}})
         .to_string()
     }
 
@@ -435,6 +486,54 @@ mod tests {
         let mut extra: Value = serde_json::from_str(&registry(RELEASE)).unwrap();
         extra["service"]["network"] = json!("mainnet");
         assert!(configured_service(&extra.to_string()).is_err());
+    }
+
+    #[test]
+    fn incomplete_or_ambiguous_release_provenance_is_refused_offline() {
+        let valid: Value = serde_json::from_str(&registry(RELEASE)).unwrap();
+        for field in ["project", "release", "organizer"] {
+            let mut bad = valid.clone();
+            bad["service"][field] = json!("invalid//value");
+            assert!(configured_service(&bad.to_string()).is_err());
+        }
+        let mut bad = valid.clone();
+        bad["service"]["organizer"] = json!("owner.testnet");
+        assert!(configured_service(&bad.to_string()).is_err());
+        let mut bad = valid.clone();
+        bad["service"].as_object_mut().unwrap().remove("bootstrap");
+        assert!(configured_service(&bad.to_string()).is_err());
+        let mut bad = valid.clone();
+        bad["service"]["bootstrap"]
+            .as_object_mut()
+            .unwrap()
+            .remove("owner_seed_block");
+        assert!(configured_service(&bad.to_string()).is_err());
+        for seed in [
+            "",
+            "invalid",
+            &"1".repeat(31),
+            &"1".repeat(45),
+            &"0".repeat(43),
+        ] {
+            let mut bad = valid.clone();
+            bad["service"]["bootstrap"]["owner_seed_block"] = json!(seed);
+            assert_eq!(
+                configured_service(&bad.to_string())
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "invalid registered bootstrap seed block"
+            );
+        }
+        for field in ["owner_init_tx", "project_init_tx", "lock_tx"] {
+            let mut bad = valid.clone();
+            bad["service"]["bootstrap"][field] = json!("invalid");
+            assert!(configured_service(&bad.to_string()).is_err());
+        }
+        let mut bad = valid;
+        bad["service"]["bootstrap"]["lock_tx"] =
+            bad["service"]["bootstrap"]["project_init_tx"].clone();
+        assert!(configured_service(&bad.to_string()).is_err());
     }
 
     #[test]

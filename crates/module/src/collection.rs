@@ -10,7 +10,7 @@
 //! OutLayer runs fail on their 126th storage call: twice on testnet, call
 //! #126 hung for the 30 s client timeout after 125 calls had succeeded, once a
 //! read and once a CAS. The cause is unresolved. Finalization therefore stays
-//! within 100 storage calls, which bounds admitted [`REGISTRATIONS`].
+//! within 100 storage calls per finalizer, which bounds [`REGISTRATIONS`].
 
 use crate::platform::{Platform, Records};
 use crate::survey::{collection_key, responses_prefix, secret_key};

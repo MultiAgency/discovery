@@ -72,9 +72,11 @@ The limit comes from storage, not the model. On testnet, OutLayer failed
 finalization runs on their 126th storage call, which hung until the 30-second
 client timeout; the cause is unresolved. Finalization costs 7 storage calls
 plus 3 per registration, or 5 for a slot whose delayed writer inserts while it
-is being frozen. At 18 registrations it needs 61 calls, and 97 if every slot
-races, within a 100-call budget that keeps a quarter of reserve below that
-failure. Finalization makes up to six model requests
+is being frozen. At 18 registrations one finalizer needs 61 calls, and 97 if
+every slot races, within a 100-call budget that keeps a quarter of reserve
+below that failure. A second finalizer racing the first can reach about 116,
+still below it; its extra calls come after the report is stored, so a failed
+run only leaves cleanup for a retry. Finalization makes up to six model requests
 (three drafts, three audits) in one 180-second job.
 
 Flooding with the public payment key can fill the survey early instead of
@@ -93,16 +95,32 @@ run inference more than once. Model attestation evidence is not kept.
 ## Trust
 
 The service relies on OutLayer's worker and keystore governance, NEAR AI's
-attested model, and the NEAR RPC used for verification. The CLI checks that the
+attested model, and the archival NEAR RPC used for verification (FastNEAR's,
+compiled into the CLI). The CLI checks that the
 creation and finalization transactions came from the organizer, ran the
-registered project and build, and that at that block the build was the project's
-only version and its owner was an initialized account with no access keys or
-contract code. Before sending any response content, the module checks the
+registered project and build. Its pinned bootstrap transactions must prove a
+fresh owner whose name is derived from a recent block hash. It checks every
+account change from that block through creation to exclude earlier account
+lifetimes and their delayed receipts. The owner's first transaction creates the
+project with the reviewed build, and its next transaction deletes its sole
+access key. The CLI also checks
+account-key changes around creation and locking, including pending transactions,
+and binds the project UUID to that creation. This rules out earlier, deleted
+versions planting survey keys or reports. The owner must remain initialized,
+without access keys or contract code, and the reviewed build must be the only
+version. Initialization receipts before the verified lock are refused. The module admits
+direct on-chain calls and HTTPS, and refuses contract relays and
+meta-transactions before execution.
+
+Before sending any response content, the module checks the
 model's Intel TDX quote, which binds a fresh nonce, the model's signing key and
 its attested configuration, and NVIDIA's GPU verdict for the same nonce. It
-encrypts each request to that key and uses a reply only after the model's signature over the exact
+encrypts each request to that key with E2EE v3, authenticating the reply key and
+request field label, and uses a reply only after the model's signature over the exact
 request and reply checks out. NEAR AI's gateway relays only that ciphertext and
-is not itself checked.
+is not itself checked. An unsupported v3 endpoint fails closed; there is no
+downgrade to v2. Deployed compatibility must pass the release smoke test before
+collecting personal data.
 
 The MVP trusts NEAR AI to manage which software runs on that attested hardware.
 NEAR AI deploys model containers frequently, and applications choose their own

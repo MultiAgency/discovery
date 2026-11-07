@@ -1,1 +1,13 @@
-{"service": {"project": "test2.research.agency.testnet/discovery", "release": "be2b43ef74ed103e81067e715c425766058291b79f10777b2f835143cd9f56a6", "organizer": "surveys.research.agency.testnet"}}
+{
+  "service": {
+    "project": "ffff80798e85168e51e6f47b185a6b7c.research.agency.testnet/discovery",
+    "release": "4adb3f91082e9fcdbeb8032b9b38fe67e6adf808d2f20a21964919f4b609bc5a",
+    "organizer": "surveys.research.agency.testnet",
+    "bootstrap": {
+      "owner_seed_block": "9soPUrPWRTYQJp6JcVeBHzS26apTLeQ8TmuxDWqUR6f7",
+      "owner_init_tx": "4HA6aRC2Lx9d6TF29tTeP46QKpxBNoUZZGc571eJU49f",
+      "project_init_tx": "7URjvSQ1v5H8CVCEFMTZDarZ7xzUmQaxEXHDbCFzA1t2",
+      "lock_tx": "H82DefwCNra9QEBPHDbQBL41BqJhs6PPSLphn76UTcny"
+    }
+  }
+}

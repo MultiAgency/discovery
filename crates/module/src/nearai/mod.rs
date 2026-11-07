@@ -7,7 +7,8 @@
 //! hardware is NEAR AI's deployment, trusted rather than independently approved
 //! here: a quote proves hardware and measured configuration, not reviewed model
 //! code. Each request is end-to-end encrypted to the attested model key (E2EE
-//! v2), so the gateway relays only ciphertext and is not itself checked, and a
+//! v3, binding the reply key and request field), so the gateway relays only
+//! ciphertext and is not itself checked, and a
 //! reply is used only after the model enclave's signature over the exact
 //! request and response bytes checks out. Errors are public on-chain output,
 //! so they carry no request, reply or provider text.
@@ -16,7 +17,8 @@
 //! `MultiAgency/private-ai@dd469a5` (`app/src`), with local changes: only the
 //! model requests are encrypted to is verified, and its platform must be fully
 //! patched; weak Ed25519 keys and non-contributory X25519 exchanges are
-//! refused; only text messages are supported; tool calls, overrides, offline
+//! refused; v3 request encryption authenticates the reply key and field label;
+//! only text messages are supported; tool calls, overrides, offline
 //! inputs and persisted receipts are removed. Tests inject a quote verifier and
 //! sign synthetic NVIDIA-format JWTs; they check protocol behavior, not real
 //! hardware or a deployed service.

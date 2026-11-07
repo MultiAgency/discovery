@@ -1,4 +1,10 @@
 {
+  "callers": {
+    "direct": "allow",
+    "contract": "deny",
+    "https": "allow",
+    "meta_tx": "deny"
+  },
   "encryption_keys": [
     {"path": "survey"}
   ],

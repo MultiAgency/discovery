@@ -13,7 +13,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use discovery_protocol::definition::SurveyDefinition;
-use discovery_protocol::envelope::SurveyKey;
+use discovery_protocol::envelope::{SurveyKey, MAX_RESPONSE};
 use discovery_protocol::response::Response;
 use discovery_protocol::{Error, Result, SurveyStatus};
 use serde::Serialize;
@@ -96,6 +96,10 @@ pub fn submit<P: Platform>(p: &P, survey_id: &str, envelope_b64: &str) -> Result
     // Canonical content, not ciphertext: re-encryption on a CLI retry must not
     // create another contribution. The keyed name prevents guessed-answer lookup.
     let canonical = serde_json::to_vec(&response)?;
+    // Omitted default fields can expand beyond the envelope's plaintext limit.
+    if canonical.len() > MAX_RESPONSE {
+        return Err(rejected("the response is too large"));
+    }
     let digest = discovery_protocol::sha256(&canonical);
     let tag = p.mac(format!("{survey_id}:{}", hex::encode(digest)).as_bytes())?;
     let key = format!("{}{}", responses_prefix(survey_id), hex::encode(tag));
@@ -354,6 +358,57 @@ mod tests {
         unknown.answers[0].question_id = secret.into();
         let e = send(&m, &c, &unknown).unwrap_err();
         assert!(!e.0.contains(secret), "{}", e.0);
+    }
+
+    #[test]
+    fn submission_size_uses_canonical_defaults_before_registration() {
+        let max = discovery_protocol::envelope::MAX_RESPONSE;
+        for omit_disclosure in [true, false] {
+            for size in [max, max + 1] {
+                let (m, c) = created();
+                let mut expected = response(
+                    Basis::Observed,
+                    Disclosure::default(),
+                    "PRIVATE-CONTENT-7731",
+                );
+                let current = serde_json::to_vec(&expected).unwrap().len();
+                expected.answers[0]
+                    .text
+                    .push_str(&"x".repeat(size - current));
+                assert_eq!(serde_json::to_vec(&expected).unwrap().len(), size);
+
+                // Both the outer disclosure and its nested phrasing have
+                // defaults. A custom client can omit either on the wire.
+                let mut wire = serde_json::to_value(&expected).unwrap();
+                let answer = &mut wire["answers"][0];
+                if omit_disclosure {
+                    answer.as_object_mut().unwrap().remove("disclosure");
+                } else {
+                    answer["disclosure"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("phrasing");
+                }
+                let plaintext = serde_json::to_vec(&wire).unwrap();
+                assert!(plaintext.len() <= max);
+                let public = hex::decode(&c.public_key).unwrap().try_into().unwrap();
+                let envelope =
+                    B64.encode(seal(&public, &plaintext, &definition().hash().unwrap()).unwrap());
+                let before = m.store.borrow().clone();
+                let result = submit(&https(&m), &c.survey_id, &envelope);
+                if size == max {
+                    assert!(result.unwrap().accepted);
+                    assert_eq!(frozen(&m, &c), vec![expected]);
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().0,
+                        "submission rejected: the response is too large"
+                    );
+                    // Oversized input must consume no registration or storage.
+                    assert_eq!(*m.store.borrow(), before);
+                }
+            }
+        }
     }
 
     #[test]

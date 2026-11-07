@@ -26,7 +26,7 @@ installation or CLI verification of the pinned release. It prints five steps:
    definition is public.
 2. **Approved contributions.** Each response's permissions, without its text:
    per answer, its basis (confirmed, observed, interpretation) and how it may
-   surface. The options are publishable and paraphrased, context-only through an approved phrasing,
+   surface. The options are publishable (paraphrased or briefly quoted), context-only through an approved phrasing,
    or context-only and never stated. Responses are encrypted to the survey key;
    every envelope is padded to the same size, so its length doesn't reveal the
    answer's length. A retry with identical answers gets fresh ciphertext and
