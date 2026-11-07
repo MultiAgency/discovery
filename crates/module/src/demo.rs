@@ -55,7 +55,7 @@ inference, simulated time and in-memory storage; not chain-verified.";
 type Draft = fn(&Value) -> Value;
 
 /// Scripted stand-in for the confidential model: it replays drafts in order
-/// and its audit finds no leaks, so only the mechanical checks reject. It keeps
+/// and its audit finds no leaks or unsupported claims, so only the mechanical checks reject. It keeps
 /// the synthesis inputs it saw, which carry the private rejection reasons.
 struct Scripted {
     drafts: RefCell<Vec<Draft>>,
@@ -68,7 +68,7 @@ impl Llm for Scripted {
     }
     fn json(&self, system: &str, user: &str) -> Result<Value> {
         if system == crate::finalize::AUDIT {
-            return Ok(json!({ "leaks": [] }));
+            return Ok(json!({ "leaks": [], "unsupported_claims": [] }));
         }
         let input: Value = serde_json::from_str(user)?;
         let draft = self.drafts.borrow_mut().remove(0);
@@ -114,10 +114,12 @@ fn clean_draft(input: &Value) -> Value {
         "acceptance_criteria": [
             { "criterion": "First-run setup",
               "change": "Before contacting any service, the CLI checks local configuration and names the missing setting.",
-              "rationale": "Remote errors that arrive before local checks cause repeated blind attempts." },
+              "rationale": "Remote errors that arrive before local checks cause repeated blind attempts.",
+              "source_ids": both(cite(input, "obstacle", "observed"), cite(input, "outcome", "confirmed")) },
             { "criterion": "Survey announcement",
               "change": "State that responses are still accepted after the deadline, until the organizer starts finalization.",
-              "rationale": "Corrects the assumption that the deadline ends collection." }
+              "rationale": "Corrects the assumption that the deadline ends collection.",
+              "source_ids": cite(input, "obstacle", "interpretation") }
         ]
     })
 }

@@ -41,7 +41,8 @@ pub struct Question {
 pub struct DisclosureRules {
     /// Forbid quoting respondents at all, even `publishable` text.
     pub no_direct_quotes: bool,
-    /// Extra terms that must never appear in the report.
+    /// Extra terms forbidden in generated report content and the survey title.
+    /// Fixed provenance and disclosure labels are not filtered.
     pub withheld_terms: Vec<String>,
 }
 
@@ -82,6 +83,18 @@ impl SurveyDefinition {
             .any(|t| t.trim().is_empty())
         {
             return err("withheld_terms must not be blank");
+        }
+        // The public report repeats this title, including when synthesis is
+        // withheld or there are no responses. Reject an incompatible title
+        // before storing the definition or creating its key.
+        let title = self.title.to_lowercase();
+        if self
+            .rules
+            .withheld_terms
+            .iter()
+            .any(|term| title.contains(&term.to_lowercase()))
+        {
+            return err("title contains a withheld term");
         }
         Ok(())
     }
@@ -164,5 +177,20 @@ mod tests {
         let mut v = serde_json::to_value(sample()).unwrap();
         v["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<SurveyDefinition>(v).is_err());
+    }
+
+    #[test]
+    fn titles_cannot_bypass_withheld_terms_including_case_and_substrings() {
+        let mut d = sample();
+        d.title = "Velvet onboarding".into();
+        for term in ["Velvet", "VELVET", "vel"] {
+            d.rules.withheld_terms = vec![term.into()];
+            assert_eq!(
+                d.validate().unwrap_err().0,
+                "title contains a withheld term"
+            );
+        }
+        d.rules.withheld_terms = vec!["unrelated".into()];
+        assert!(d.validate().is_ok());
     }
 }

@@ -31,6 +31,46 @@ An invitation's checkout commit chooses the CLI respondents install, not the
 service; it may be newer than the reviewed source above. To audit the service,
 rebuild the listed commit and compare its hash with the pin.
 
+Builds currently embed toolchain installation paths. The documented source
+reproduced `4adb3f91` locally with default stable Cargo on Rust 1.97.0. An
+explicit `+1.97.0` installation of the same compiler produced a different hash
+solely because embedded toolchain paths differed. Record `rustc -vV`,
+`cargo --version`, the toolchain location, build flags and artifact hash with each
+release. Portable hash reproduction needs a hermetic build with path remapping;
+a matching compiler version alone is insufficient.
+
+## Unreleased hardening
+
+`releases.json` still registers `4adb3f91`; the checks below require a new locked
+service release and post-lock smoke test. They do not retrofit existing surveys.
+
+- Every mechanically valid draft with responses receives one combined privacy
+  and factual-support audit, including publishable-only responses. Missing or malformed verdicts
+  reject the draft. This is best-effort model review, not proof of truth.
+- Proposed acceptance criteria must cite valid, authorized answers, as findings
+  already do. Private citations are checked and removed before publication.
+  The model is told it lacks the issue body; proposals require maintainer review
+  against the actual issue rather than claims about known existing criteria.
+- New definitions cannot contain a withheld term in their report title.
+
+The current CLI can still verify and render the registered release's unchanged
+report format. Its **source basis** labels describe cited answers, not confirmed
+findings. Its local payment-key owner checks and fixed error classifications
+also apply when using the current service.
+
+Before registering the new module, repeat the full-capacity smoke test: auditing
+publishable-only batches adds work to a path that previously skipped the audit.
+The maximum remains three drafts plus three audits in one 180-second job. Record
+fidelity and disclosure review of the generated reports, not just valid JSON.
+
+Public payment/admission abuse and independent response expiry remain open.
+The 18-registration limit and indefinite retention policy have not changed.
+A discard path needs a defined public outcome, organizer authority, trusted
+time, provenance verification, and the existing delayed-write/cleanup fences;
+changing storage or weakening the release pins is not a substitute. Keep the
+pilot controlled while those decisions and an independent participant run are
+outstanding.
+
 ## Setup
 
 1. Freeze the source, then build and review the module and deploy those exact

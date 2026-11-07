@@ -7,8 +7,8 @@ extra help. -->
 
 # Try Discovery with your agent
 
-We're testing Discovery, a confidential survey service for agents, by asking you
-to try it. Your existing agent installs the CLI, verifies the survey, helps you
+We're testing Discovery in a small pilot run by the service organizer. Your
+existing agent installs the CLI, verifies the survey, helps you
 answer, shows you exactly what it will submit, and submits only what you
 approve. Afterwards a synthesized report is posted on
 [{{target}}]({{issue_url}}), and supported findings become proposed GitHub
@@ -27,19 +27,25 @@ not in public.
   needed to respond.
 - An agent that can run shell commands and read files, such as Claude Code or
   Codex.
-- About 15 minutes. The first verification on a machine checks the release's
-  bootstrap proof and can take a few minutes on the free public RPC.
+- Time for a Rust build, verification and approving your answers. The first
+  verification on a machine checks the release's bootstrap proof and can take
+  a few minutes on the free public RPC. We are measuring the complete joining
+  time during this pilot.
 
 ## Give this to your agent
 
 > Help me respond to the Discovery survey described at {{page_url}}.
-> Install the CLI from the trusted checkout below and use the respondent skill
-> from that checkout. Stop if the survey does not verify or the release does not
-> match. Use only context I authorize and ask me about missing details. Show me
+> Read that invitation for installation instructions and survey values. Use
+> https://github.com/MultiAgency/discovery at pinned commit `{{commit}}`, install
+> the CLI from that checkout, and follow `skills/discovery-respondent/SKILL.md`
+> from the same commit. Stop if the survey does not verify or the release does
+> not match. Use only context I authorize and ask me about missing details. Show me
 > every answer, its basis and its publication permission before submitting.
 > Do not publish my answers or announce my participation.
 
 ### Install (trusted checkout)
+
+The `cargo install` below can replace a previously installed `discovery` CLI (for example, from an earlier survey); save that binary first if you still need it.
 
 ```bash
 git clone https://github.com/MultiAgency/discovery
@@ -86,7 +92,8 @@ answer names its question id.
 For each answer you choose:
 
 - **Basis:** confirmed by you, observed by your agent, or your agent's
-  interpretation.
+  interpretation. Report basis labels describe the cited answers; they do not
+  mean you approved the model's generated finding.
 - **Publication:** `publishable` ({{publishable}}) or `context_only`.
   Context-only answers shape the report but are never stated, unless you
   approve a specific phrasing.
@@ -104,15 +111,19 @@ discovery submit {{survey_id}} --init-tx {{init_tx}} --target {{target}} answers
 ```
 
 It verifies the survey again, encrypts the answers on your machine and prints
-"Submitted." on success. If it fails or times out, retry with the same answers:
-they count once, even if the earlier attempt was stored. "survey is full" (at
-most 18 registrations) or "survey is closed" means this attempt was refused.
+"Submitted." on success. After a timeout or temporary service failure, wait
+and retry with the same answers: they count once, even if the earlier attempt
+was stored. Racing or interrupted attempts can still use additional places.
+"survey is full" (at most 18 registrations) or "survey is closed" means this
+attempt was refused. For a payment or access error, use the private help route
+before retrying.
 
 ## Privacy limits
 
 Only the synthesized report is published, or a withholding notice if no draft
-passes the disclosure checks. No individual answer is published. Confidentiality
-is not anonymity: distinctive details you approve could identify you to someone
+passes the disclosure checks. Individual responses are not returned; authorized
+text may appear in the report. Confidentiality is not anonymity: distinctive
+details you approve could identify you to someone
 who knows you. The disclosure checks are limited heuristics. OutLayer's public
 job log shows submission counts and times. Please don't comment, react or
 otherwise say publicly that you took part.
@@ -126,7 +137,10 @@ The deadline is {{deadline}}. It is the earliest time we may finalize;
 responses are accepted until finalization starts. The verified report will be
 posted on [{{target}}]({{issue_url}}), followed by links to any issues created
 or updated from it. Its footer gives a `discovery report …` command; run it to
-check the posted report against the chain yourself.
+check the posted report against the chain yourself. Verification authenticates
+the released report; judge separately whether its findings reflect your
+authorized needs. Proposed criteria require the maintainer's review against the
+actual issue before any change.
 
 ## Private help
 

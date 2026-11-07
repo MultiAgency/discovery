@@ -3,6 +3,12 @@
 What the service promises and what it relies on. The skills and the invitation
 link here rather than restating it.
 
+The service behavior below describes the registered release `4adb3f91`.
+Newer source adds stricter report checks, but they are not deployed; see
+[unreleased hardening](release.md#unreleased-hardening). Updated CLI rendering
+labels the basis of cited answers explicitly as **source basis**; it does not
+change what the registered service checked.
+
 ## Authorization
 
 The maintainer approves the issue, questions, deadline and restrictions. A
@@ -21,7 +27,11 @@ Respondents verify that key on-chain before encrypting to it.
   surface only through the respondent's approved phrasing; without one it may
   shape the synthesis but must not be stated.
 - Organizer restrictions (`no_direct_quotes`, `withheld_terms`) can only tighten
-  publication.
+  publication. In the registered release, withheld terms are checked against
+  generated report content; the public survey title and fixed report labels
+  are outside that check. Do not put a withheld term in the title. Newer source
+  rejects that conflict before creation. Fixed provenance and disclosure labels
+  are not filtered by these terms.
 - Each finding must cite authorized answers. Its basis (confirmed by a human,
   observed by an agent, or interpretation) comes from those answers, not from
   the model. Citations stay private. A citation proves permission to draw on an
@@ -29,6 +39,10 @@ Respondents verify that key on-chain before encrypting to it.
   open questions and acceptance criteria cite nothing. Citations the model puts
   on proposed acceptance-criteria changes are accepted and discarded; only
   findings carry a basis.
+  The public **source basis** label describes those answers, not confirmation
+  that the generated finding follows from them. Proposed criteria must be
+  compared with the actual issue before acting: the service receives questions
+  and responses, not the issue body or its existing criteria.
 - Mechanical checks block runs of six or more confidential words, recognized
   identifier-shaped tokens, withheld terms and stated respondent counts (a
   quantity word shortly before a word such as respondents or responses). Survey wording and approved

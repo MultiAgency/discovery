@@ -177,6 +177,18 @@ mod tests {
         response(Basis::Confirmed, Disclosure::Publishable, text)
     }
 
+    #[test]
+    fn a_title_conflicting_with_restrictions_is_refused_before_storage() {
+        let m = Memory::new(Mode::Near { block_ns: 1_000 });
+        let mut d = definition();
+        d.title = "Velvet onboarding".into();
+        d.rules.withheld_terms = vec!["VELVET".into()];
+        let error = init(&m, d).unwrap_err();
+        assert_eq!(error.0, "title contains a withheld term");
+        assert!(m.store.borrow().is_empty());
+        assert_eq!(m.calls.get(), 0);
+    }
+
     fn envelope(c: &Created, text: &str) -> String {
         encrypt(c, &definition(), &publishable(text))
     }

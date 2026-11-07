@@ -54,7 +54,8 @@ pub struct CriterionChange {
     pub rationale: String,
 }
 
-const LIMITS: [&str; 2] = [
+const LIMITS: [&str; 3] = [
+    "Source basis describes the cited answers, not independent confirmation of a finding. Check proposed criteria against the issue before acting.",
     "Combinations of approved phrasings could still identify a respondent to someone who already knows them.",
     "Response counts and submission times are visible in OutLayer's public job log; identities are not.",
 ];
@@ -93,16 +94,16 @@ impl Report {
                         .basis
                         .iter()
                         .map(|b| match b {
-                            Basis::Confirmed => "confirmed by a human",
-                            Basis::Observed => "observed by an agent",
-                            Basis::Interpretation => "interpretation",
+                            Basis::Confirmed => "human confirmation",
+                            Basis::Observed => "agent observation",
+                            Basis::Interpretation => "agent interpretation",
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
                     s += &if basis.is_empty() {
                         format!("- {}\n", esc(&f.statement))
                     } else {
-                        format!("- **[{basis}]** {}\n", esc(&f.statement))
+                        format!("- **[source basis: {basis}]** {}\n", esc(&f.statement))
                     };
                 }
                 s += "\n";
@@ -110,7 +111,7 @@ impl Report {
             section(&mut s, "Disagreements", &b.disagreements);
             section(&mut s, "Open questions", &b.open_questions);
             if !b.acceptance_criteria.is_empty() {
-                s += "### Proposed acceptance-criteria changes\n\n";
+                s += "### Proposed acceptance criteria\n\n";
                 for c in &b.acceptance_criteria {
                     s += &format!(
                         "- **{}**: {} ({})\n",
@@ -196,5 +197,32 @@ mod tests {
             "disagreements": [], "open_questions": [], "acceptance_criteria": []
         });
         assert!(serde_json::from_value::<Body>(draft).is_err());
+    }
+
+    #[test]
+    fn source_basis_is_distinct_from_confirmation_of_the_generated_finding() {
+        let report = Report {
+            survey_id: "abc".into(),
+            title: "Survey".into(),
+            target: Target {
+                repo: "o/r".into(),
+                number: 1,
+            },
+            status: Status::Released,
+            body: Body {
+                findings: vec![Finding {
+                    statement: "A generated interpretation.".into(),
+                    basis: vec![Basis::Confirmed, Basis::Observed, Basis::Interpretation],
+                }],
+                ..Default::default()
+            },
+            model: "m".into(),
+        };
+        let markdown = report.markdown();
+        assert!(markdown.contains(
+            "[source basis: human confirmation, agent observation, agent interpretation]"
+        ));
+        assert!(markdown.contains("not independent confirmation of a finding"));
+        assert!(!markdown.contains("[confirmed by a human]"));
     }
 }

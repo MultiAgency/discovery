@@ -6,13 +6,21 @@ what stops people and their agents from joining a survey? The local demo
 rehearses the protocol with invented answers. The live demo is the MVP
 acceptance test.
 
+The pilot uses an invitation shared privately; the issue is the destination for
+its report and need not carry the invitation. The organizer reported a passed
+end-to-end rehearsal on November 7, 2026: clean clone, first-run bootstrap
+verification, interview, approval and a live "Submitted." The invitation must
+still supply the actual survey, creation transaction, payment key, target and
+trusted checkout.
+
 ## What each kind of evidence proves
 
 | Evidence | Proves | Does not prove |
 |---|---|---|
 | Local tests and `scripts/demo.sh` | The survey, envelope, admission, publication-check, finalization and cleanup logic; CLI preflight, provenance parsing and invitation rendering, all against doubles | Deployed confidentiality, storage or keystore behavior, model quality, chain provenance |
 | Deployed synthetic smoke test on `4adb3f91` ([evidence](release-evidence.md)) | The locked release on testnet: CLI bootstrap and survey verification, E2EE v3 inference, the full 18 registrations, release and refinalize, cleanup, an undelivered result recovered by retrying | That a person who isn't on the team can install, verify, answer and submit from the invitation alone; usefulness of findings from real answers |
-| Not yet tested | An independent participant on a clean machine; a real survey's report; follow-up issues accepted by the maintainer | |
+| Rehearsal, reported November 7, 2026 | Clean clone through first-run bootstrap proof, interview, approval and live submission | General completion rates, a real survey's report, or useful follow-up changes |
+| Not yet established | An independent participant completing without coaching; a real survey's report; follow-up issues accepted by the maintainer | |
 
 Known limit carried into the live demo: registrations contending with closing
 can take one finalizer to 111 storage calls, above the intended 100-call
@@ -78,6 +86,7 @@ feedback helps improve this product.
 | Verified participation works | Post-lock survey verification and an accepted, owner-approved submission |
 | Feedback reflects actual experience | Questions distinguish observed obstacles, assumptions and desired outcomes |
 | Publication preserves permissions | Verified report or withholding notice; manual review before posting |
+| Findings are interpreted accurately | Respondents can privately check their authorized needs; the maintainer compares proposed criteria with the actual issue |
 | Findings become actionable | Maintainer-approved new issue or update linked to a supporting public finding |
 | A change helps | Implement one supported improvement and invite a participant to retry |
 
@@ -85,6 +94,12 @@ If a participant cannot reach submission, that is a product finding, not a
 reason to coach them through silently. Request only minimal, sanitized details
 through the private help route, and don't present help messages as survey
 evidence unless their author separately approves publication.
+
+Record completion, time spent, help required and the stopping point for each
+rehearsal only with the participant's agreement. Use sanitized observations;
+retain no answers or identifying command logs in the pilot record. An accepted
+submission, a permitted report and a useful resulting change are separate
+checks, so record each outcome.
 
 ### Runbook
 
@@ -99,7 +114,9 @@ publication with the maintainer. Commands follow the
    fetch origin and confirm the commit is published. Its `releases.json` must
    register `4adb3f91`. Run the checks in
    the [README](../README.md#quick-start), then
-   `cargo install --locked --path crates/cli`.
+   `cargo install --locked --path crates/cli`. Module changes in this checkout
+   remain source-only until a new locked release is registered and passes its
+   deployed smoke test; the current pin still selects `4adb3f91`.
 2. **Definition.** Copy
    [fixtures/definition.json](../fixtures/definition.json)
    and set `deadline_ns` as text (jq would round it), then review it. Keep
@@ -134,16 +151,24 @@ publication with the maintainer. Commands follow the
    file to a teammate on a clean machine, with only their agent, before the page
    URL is public. They follow the file to an accepted submission of their own
    real experience. Record where they needed help; this uses a registration.
-6. **Invite (public).** Publish the page at the URL given in step 4 and send
+6. **Invite.** Publish the page at the URL given in step 4 and send
    the link privately within the remaining 18-registration capacity. The
-   rehearsal uses a place; racing retries can consume additional places.
+   rehearsal uses a place; racing retries can consume additional places. Check
+   the published page from a clean session before sharing it. Publish a link on
+   the issue only if the maintainer chooses a public invitation. Keep the pilot
+   small while admission and payment-key abuse remain
+   unresolved ([policy](policy.md#collection-and-retention)).
 7. **Finalize (paid)** after the deadline: `discovery prepare finalize`, sign
    with 0.2 NEAR, then `discovery report … --target MultiAgency/discovery#1 >
    ../discovery-run/report.md`. On an `{"error": …}` output or a null result,
    reconcile the original transaction before another paid attempt. Once
    collection closes, retries resume finalization or cleanup; if a report was
    stored, they return that same report.
-8. **Publish (public).** Post `../discovery-run/report.md` unchanged on issue #1.
+8. **Publish (public).** Read the report before posting it unchanged on issue
+   #1. Its source basis describes cited answers, not human confirmation of the
+   generated finding. Treat acceptance criteria as proposals and compare them
+   with the issue's current requirements. Record concerns separately using only
+   authorized public material; do not repair a report using private responses.
 9. **Follow up (public).** Propose issue updates or new issues from the posted
    findings as the organizer skill describes; create nothing without the
    maintainer's approval, then link them from issue #1. A withheld report

@@ -31,7 +31,7 @@ const API: &str = "https://testnet-api.outlayer.ai";
 #[derive(Parser)]
 #[command(name = "discovery", about = "Confidential surveys for agents")]
 struct Cli {
-    /// The organizer's published, restricted submission payment key.
+    /// The organizer's published submission payment key.
     #[arg(
         long,
         global = true,
@@ -154,17 +154,11 @@ fn run(cli: Cli, registry: &str) -> Result<()> {
         Command::Verify { survey_id, init_tx } => {
             check_survey_id(&survey_id)?;
             check_tx(&init_tx)?;
-            let key = check_payment_key(payment_key.as_deref())?;
+            let key = check_payment_key(payment_key.as_deref(), &release.organizer)?;
             let (survey, state, accepting) =
                 verified_state(&release, &survey_id, &init_tx, key, target)?;
             if accepting {
-                eprintln!(
-                    "Next: have your agent draft answers.json with \
-                     skills/discovery-respondent/SKILL.md (format: `discovery submit --help`), \
-                     approve the exact answers, then run `discovery submit {survey_id} \
-                     --init-tx {init_tx} answers.json`. The deadline is the earliest \
-                     finalization time; answers count until finalization starts."
-                );
+                eprintln!("{}", verify_next_hint(&survey_id, &init_tx, target));
             }
             print(&json!({
                 "survey_id": survey_id,
@@ -184,7 +178,7 @@ fn run(cli: Cli, registry: &str) -> Result<()> {
         } => {
             check_survey_id(&survey_id)?;
             check_tx(&init_tx)?;
-            let key = check_payment_key(payment_key.as_deref())?;
+            let key = check_payment_key(payment_key.as_deref(), &release.organizer)?;
             let response = read_answers(&answers)?;
             let survey = verified(&release, &survey_id, &init_tx, target)?;
             let envelope = seal_answers(&survey, response)?;
@@ -225,7 +219,7 @@ fn run(cli: Cli, registry: &str) -> Result<()> {
                 return Err("--target is required: the issue the invitation is for".into());
             }
             invitation::check_details(&commit, &page)?;
-            let key = check_payment_key(payment_key.as_deref())?;
+            let key = check_payment_key(payment_key.as_deref(), &release.organizer)?;
             invitation::check_payment_key(key)?;
             let (survey, _, accepting) =
                 verified_state(&release, &survey_id, &init_tx, key, target)?;
@@ -247,6 +241,31 @@ fn run(cli: Cli, registry: &str) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Keep the issue constraint on the suggested submission, with shell quoting
+/// for any unusual target characters accepted by the existing target format.
+fn verify_next_hint(survey_id: &str, init_tx: &str, target: Option<&str>) -> String {
+    let target = target
+        .map(|target| {
+            let argument = if target
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-/#".contains(&b))
+            {
+                target.to_string()
+            } else {
+                format!("'{}'", target.replace('\'', "'\\''"))
+            };
+            format!(" --target {argument}")
+        })
+        .unwrap_or_default();
+    format!(
+        "Next: have your agent draft answers.json with \
+         skills/discovery-respondent/SKILL.md (format: `discovery submit --help`), \
+         approve the exact answers, then run `discovery submit {survey_id} \
+         --init-tx {init_tx}{target} answers.json`. The deadline is the earliest \
+         finalization time; answers count until finalization starts."
+    )
 }
 
 /// `verify`'s checks: the chain-authenticated survey, the service's state for
@@ -298,12 +317,21 @@ fn check_tx(hash: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_payment_key(key: Option<&str>) -> Result<&str> {
-    match key {
-        Some(key) if key.splitn(3, ':').filter(|part| !part.is_empty()).count() == 3 => Ok(key),
-        Some(_) => Err("DISCOVERY_PAYMENT_KEY must look like owner:nonce:secret".into()),
-        None => Err("DISCOVERY_PAYMENT_KEY is not set; it is in the survey announcement".into()),
+fn check_payment_key<'a>(key: Option<&'a str>, organizer: &str) -> Result<&'a str> {
+    let key = key.ok_or("DISCOVERY_PAYMENT_KEY is not set; it is in the survey announcement")?;
+    let parts: Vec<_> = key.splitn(3, ':').collect();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err("DISCOVERY_PAYMENT_KEY must look like owner:nonce:secret".into());
     }
+    // The caller selects OutLayer's storage namespace. A well-formed key for
+    // another account cannot access this organizer's survey; refuse it before
+    // archival verification or a paid service call, without printing the key.
+    if parts[0] != organizer {
+        return Err(
+            "DISCOVERY_PAYMENT_KEY belongs to a different account than the registered organizer; use the key from this survey's announcement".into(),
+        );
+    }
+    Ok(key)
 }
 
 /// The survey id and creation input of a valid definition for `expected`.
@@ -313,7 +341,7 @@ fn read_definition(path: &Path, expected: Option<&str>) -> Result<(String, Value
         serde_json::from_slice(&bytes).map_err(|_| "invalid survey definition JSON")?;
     definition
         .validate()
-        .map_err(|_| "invalid survey definition")?;
+        .map_err(|error| safe_definition_error(&error))?;
     check_target(&definition.target, expected).map_err(|_| "definition does not match --target")?;
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -326,6 +354,37 @@ fn read_definition(path: &Path, expected: Option<&str>) -> Result<(String, Value
         survey_id,
         json!({"operation": "init_survey", "definition": definition}),
     ))
+}
+
+/// Protocol validation can quote organizer-written values, including question
+/// IDs. Retain fixed field names that help repair the file, never those values.
+fn safe_definition_error(error: &discovery_protocol::Error) -> &'static str {
+    match error.0.as_str() {
+        message if message.starts_with("unsupported definition version ") => {
+            "invalid survey definition: version is unsupported; use the format in the organizer skill"
+        }
+        "target.number must be a positive issue number" => {
+            "invalid survey definition: target.number must be a positive issue number"
+        }
+        "title is empty" => "invalid survey definition: title must not be blank",
+        "target.repo must be owner/name" => {
+            "invalid survey definition: target.repo must look like OWNER/REPO"
+        }
+        "no questions" => "invalid survey definition: questions must contain at least one question",
+        "every question needs an id and a prompt" => {
+            "invalid survey definition: every questions[] entry needs a nonempty id and prompt"
+        }
+        message if message.starts_with("duplicate question id ") => {
+            "invalid survey definition: questions[].id values must be unique"
+        }
+        "withheld_terms must not be blank" => {
+            "invalid survey definition: rules.withheld_terms must not contain blank terms"
+        }
+        "title contains a withheld term" => {
+            "invalid survey definition: title conflicts with rules.withheld_terms; change the title or restrictions"
+        }
+        _ => "invalid survey definition; check the format and restrictions in the organizer skill",
+    }
 }
 
 /// Parse answers and check their shape and size; question ids need the
@@ -370,7 +429,7 @@ fn call(release: &Release, key: &str, input: Value) -> Result<Value> {
         .timeout(std::time::Duration::from_secs(120))
         .set("X-Payment-Key", key)
         .send_json(json!({ "input": input, "version_key": release.wasm_hash }))
-        .map_err(|_| "service request failed; retry the identical answers if submitting")?
+        .map_err(|error| safe_service_error(&error))?
         .into_json()
         .map_err(|_| "invalid service response")?;
     if reply["status"] != "completed" {
@@ -380,6 +439,34 @@ fn call(release: &Release, key: &str, input: Value) -> Result<Value> {
         return Err(safe_module_error(error).into());
     }
     Ok(reply["output"].clone())
+}
+
+/// Fixed recovery guidance only: HTTP reasons, bodies, URLs and transport
+/// diagnostics may contain credentials or response material.
+fn safe_service_error(error: &ureq::Error) -> &'static str {
+    match error {
+        ureq::Error::Status(401, _) => {
+            "service authentication failed; check the published payment key or contact the organizer through the private help route"
+        }
+        ureq::Error::Status(402, _) => {
+            "service payment failed; contact the organizer through the private help route before retrying"
+        }
+        ureq::Error::Status(403, _) => {
+            "service access was refused; contact the organizer through the private help route before retrying"
+        }
+        ureq::Error::Status(429, _) => {
+            "service is rate-limiting requests; wait before retrying the identical answers if submitting"
+        }
+        ureq::Error::Status(408 | 500..=599, _) => {
+            "service is temporarily unavailable; retry the identical answers if submitting"
+        }
+        ureq::Error::Status(_, _) => {
+            "service rejected the request; contact the organizer through the private help route"
+        }
+        ureq::Error::Transport(_) => {
+            "service connection failed; check connectivity and retry the identical answers if submitting"
+        }
+    }
 }
 
 fn verified(
@@ -406,7 +493,7 @@ fn seal_answers(survey: &verify::Verified, response: Response) -> Result<String>
     let hash = survey.definition.hash()?;
     response
         .validate(&survey.definition)
-        .map_err(|_| "answers do not match the verified survey")?;
+        .map_err(|_| "answers do not match the verified survey; check answers[].question_id against `discovery verify`")?;
     let public: [u8; 32] = hex::decode(&survey.public_key)?
         .try_into()
         .map_err(|_| "bad survey key")?;
@@ -485,6 +572,139 @@ mod tests {
             safe_module_error(&json!("SECRET private answer")),
             "module refused the request"
         );
+    }
+
+    #[test]
+    fn verification_next_hint_preserves_the_optional_issue_constraint() {
+        let with_target = verify_next_hint("survey", "creation", Some("owner/repo#42"));
+        assert!(with_target.contains(
+            "`discovery submit survey --init-tx creation --target owner/repo#42 answers.json`"
+        ));
+        let without_target = verify_next_hint("survey", "creation", None);
+        assert!(
+            without_target.contains("`discovery submit survey --init-tx creation answers.json`")
+        );
+        assert!(!without_target.contains("--target"));
+
+        // The target is copied as one shell argument, not executable syntax.
+        let unusual = verify_next_hint("survey", "creation", Some("owner/o'$(ignored)#42"));
+        assert!(unusual.contains("--target 'owner/o'\\''$(ignored)#42' answers.json"));
+    }
+
+    #[test]
+    fn service_failures_give_distinct_safe_recovery_instructions() {
+        let mut categories = std::collections::BTreeSet::new();
+        for (status, expected) in [
+            (401, "authentication failed"),
+            (402, "payment failed"),
+            (403, "access was refused"),
+            (429, "rate-limiting"),
+            (503, "temporarily unavailable"),
+            (400, "rejected the request"),
+        ] {
+            let error: ureq::Error =
+                ureq::Response::new(status, "SECRET reason", "SECRET response body")
+                    .unwrap()
+                    .into();
+            let message = safe_service_error(&error);
+            assert!(message.contains(expected), "{status}: {message}");
+            assert!(!message.contains("SECRET"));
+            assert!(
+                categories.insert(message),
+                "different recovery cases were collapsed"
+            );
+            if matches!(status, 400..=403) {
+                assert!(message.contains("private help route"));
+            }
+        }
+        let error: ureq::Error =
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "SECRET connection details").into();
+        let message = safe_service_error(&error);
+        assert!(message.contains("check connectivity"));
+        assert!(message.contains("identical answers"));
+        assert!(!message.contains("SECRET"));
+        assert!(categories.insert(message));
+    }
+
+    #[test]
+    fn wrong_payment_account_stops_before_reads_verification_and_paid_calls() {
+        let survey = "c".repeat(64);
+        let tx = "8hT4w1nDgUUcV2Z4ztUn5JAtM4uWr6xkJyvQHbTTvAcK";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let cases: &[&[&str]] = &[
+            &["discovery", "verify", &survey, "--init-tx", tx],
+            &[
+                "discovery",
+                "submit",
+                &survey,
+                "--init-tx",
+                tx,
+                "/missing/SECRET-answers.json",
+            ],
+            &[
+                "discovery",
+                "--target",
+                "owner/repo#1",
+                "invitation",
+                &survey,
+                "--init-tx",
+                tx,
+                "--commit",
+                commit,
+                "--page",
+                "https://example.invalid/invitation",
+            ],
+        ];
+        for args in cases {
+            let message = local_error(args, Some("SECRET-other.testnet:1:SECRET-key"));
+            assert!(message.contains("different account"), "{message}");
+            assert!(message.contains("announcement"));
+            assert!(!message.contains("SECRET"));
+        }
+        let key = "organizer.testnet:1:secret";
+        assert_eq!(
+            check_payment_key(Some(key), "organizer.testnet").unwrap(),
+            key
+        );
+        for key in [
+            "",
+            "organizer.testnet:1",
+            "organizer.testnet::secret",
+            ":1:secret",
+        ] {
+            let message = check_payment_key(Some(key), "organizer.testnet")
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains("owner:nonce:secret"));
+        }
+    }
+
+    #[test]
+    fn definition_repair_guidance_names_fields_without_echoing_values() {
+        let mut definition = json!({"version": discovery_protocol::definition::DEFINITION_VERSION,
+            "title": "Onboarding", "target": {"repo": "owner/repo", "number": 42},
+            "deadline_ns": 1900000000000000000u64,
+            "questions": [{"id": "SECRET-question", "prompt": "What happened?"},
+                          {"id": "SECRET-question", "prompt": "What did you try?"}],
+            "rules": {"no_direct_quotes": false, "withheld_terms": []}});
+        let file = temp_file("repair", &definition.to_string());
+        let error = read_definition(&file, None).unwrap_err().to_string();
+        assert!(error.contains("questions[].id"));
+        assert!(error.contains("unique"));
+        assert!(!error.contains("SECRET"));
+
+        definition["questions"] = json!([]);
+        fs::write(&file, definition.to_string()).unwrap();
+        let error = read_definition(&file, None).unwrap_err().to_string();
+        assert!(error.contains("questions must contain at least one"));
+
+        definition["questions"] = json!([{"id": "workflow", "prompt": "What happened?"}]);
+        definition["rules"]["withheld_terms"] = json!(["Onboarding"]);
+        fs::write(&file, definition.to_string()).unwrap();
+        let error = read_definition(&file, None).unwrap_err().to_string();
+        assert!(error.contains("title conflicts with rules.withheld_terms"));
+        assert!(!error.contains("Onboarding"));
+        fs::remove_file(file).unwrap();
     }
 
     #[test]

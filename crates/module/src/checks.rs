@@ -94,7 +94,10 @@ impl Prepared {
                             allowed.push(a.text.as_str());
                             "text"
                         };
-                        authorized.push(json!({ label: a.text }));
+                        authorized.push(json!({
+                            "source_id": id, "question_id": a.question_id,
+                            "basis": a.basis, label: a.text,
+                        }));
                         draft["tier"] = json!("publishable");
                         draft[label] = json!(a.text);
                         Some(a.basis)
@@ -103,7 +106,10 @@ impl Prepared {
                         private.push(a.text.as_str());
                         allowed.extend(phrasing.iter().map(String::as_str));
                         if let Some(p) = phrasing {
-                            authorized.push(json!({"approved_phrasing": p}));
+                            authorized.push(json!({
+                                "source_id": id, "question_id": a.question_id,
+                                "basis": a.basis, "approved_phrasing": p,
+                            }));
                         }
                         confidential.push(json!({"fact": a.text}));
                         draft["tier"] = json!("context_only");

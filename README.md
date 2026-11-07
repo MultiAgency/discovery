@@ -22,17 +22,24 @@ key.
 
 ## Readiness
 
-**A first real survey is open on
-[MultiAgency/discovery#1](https://github.com/MultiAgency/discovery/issues/1).**
+**Operator-run private pilot; end-to-end rehearsal passed.**
+A clean-clone rehearsal completed first-run bootstrap verification, interview,
+approval and a live submission. The invitation is shared privately;
+[MultiAgency/discovery#1](https://github.com/MultiAgency/discovery/issues/1)
+is the destination for the permitted report.
 
 - [releases.json](releases.json) registers locked release `4adb3f91` with a
   verified clean bootstrap. Its post-lock synthetic smoke test passed,
   including deployed NEAR AI E2EE v3.
 - The deployed service and this source can differ: see
   [deployed service and source](docs/release.md#deployed-service-and-source).
+  Source improvements require a new locked release before the service gains
+  them; installing a newer CLI does not upgrade the deployed module.
 - Before inviting anyone: render the [invitation](docs/invitation.md) with
   `scripts/invitation.sh` and have a teammate rehearse it from a clean machine
-  ([runbook](docs/demo.md#runbook)).
+  without extra joining values or live coaching
+  ([runbook](docs/demo.md#runbook)). Creation and finalization use the pinned
+  organizer account, so maintainers coordinate with the service operator.
 - The first `discovery verify` or `submit` on a machine checks the release's
   bootstrap proof (about 43 archival RPC calls; tens of seconds on FastNEAR's
   free tier, seconds with an optional `FASTNEAR_API_KEY`). The passed proof is
