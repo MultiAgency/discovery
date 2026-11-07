@@ -85,45 +85,17 @@ struct Registry {
     service: Option<Release>,
 }
 
-/// Without a registered service, live use is refused.
+/// Without a registered service, live use is refused. The entry needs no
+/// further checks here: verification against the chain fails closed on a
+/// wrong project, build or organizer, or an owner that still holds keys.
 fn configured_service(registry: &str) -> Result<Release> {
-    let release = serde_json::from_str::<Registry>(registry)?
+    Ok(serde_json::from_str::<Registry>(registry)?
         .service
-        .ok_or("this build registers no release (releases.json has no registered service)")?;
-    let hash = &release.wasm_hash;
-    if !is_hex(hash, 32) || hash.to_lowercase() != *hash {
-        return Err("releases.json: release must be the lowercase hex sha256 of the wasm".into());
-    }
-    match release.project.split_once('/') {
-        Some((owner, _)) if owner == release.organizer.as_str() => {
-            return Err(format!(
-                "releases.json: project owner {owner} must not be the organizer; \
-                 the owner ends with no access keys"
-            )
-            .into())
-        }
-        Some((owner, name)) if is_account(owner) && !name.is_empty() && !name.contains('/') => {}
-        _ => return Err("releases.json: project must be <owner account>/<name>".into()),
-    }
-    if !is_account(&release.organizer) {
-        return Err("releases.json: organizer must be a NEAR account id".into());
-    }
-    Ok(release)
+        .ok_or("this build registers no release (releases.json has no registered service)")?)
 }
 
 fn is_hex(s: &str, bytes: usize) -> bool {
     s.len() == 2 * bytes && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// NEAR account id shape: 2–64 chars of `a-z0-9_-` separated by dots.
-fn is_account(s: &str) -> bool {
-    (2..=64).contains(&s.len())
-        && s.split('.').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        })
 }
 
 /// A command whose local inputs have all been read and validated.
@@ -252,10 +224,14 @@ fn read_definition(path: &PathBuf, expected: Option<&str>) -> Result<(String, Va
     ))
 }
 
-/// Parse answers and check their size; question ids need the verified definition.
+/// Parse answers and check their shape and size; question ids need the
+/// verified definition.
 fn read_answers(path: &PathBuf) -> Result<Response> {
     let bytes = fs::read(path).map_err(|_| "cannot read answers file")?;
     let response: Response = serde_json::from_slice(&bytes).map_err(|_| "invalid answers JSON")?;
+    response
+        .validate_answers()
+        .map_err(|_| "answers need at least one answer, and no blank text or phrasing")?;
     let size = serde_json::to_vec(&response)?.len();
     if size > MAX_RESPONSE {
         return Err(format!(
@@ -383,8 +359,9 @@ fn run(cli: &Cli) -> Result<()> {
                 "survey_id": survey_id,
                 "release": release.wasm_hash,
                 "definition": survey.definition,
-                "accepting_responses": state.key_present && !state.closed,
+                "accepting_responses": state.key_present && !state.closed && !state.full,
                 "closed": state.closed,
+                "full": state.full,
                 "key_present": state.key_present,
                 "report_released": state.report_released,
             }))?;
@@ -438,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_entries_are_validated() {
+    fn registry_entries_parse_strictly() {
         let error = configured_service(r#"{"service": null}"#).err().unwrap();
         assert_eq!(
             error.to_string(),
@@ -458,22 +435,6 @@ mod tests {
         let mut extra: Value = serde_json::from_str(&registry(RELEASE)).unwrap();
         extra["service"]["network"] = json!("mainnet");
         assert!(configured_service(&extra.to_string()).is_err());
-        for (field, value) in [
-            ("release", "reviewed"),
-            ("release", &RELEASE.to_uppercase()),
-            ("project", "discovery"),
-            ("project", "owner.testnet/a/b"),
-            ("project", "Owner.testnet/discovery"),
-            ("project", "organizer.testnet/discovery"),
-            ("organizer", ""),
-        ] {
-            let mut entry: Value = serde_json::from_str(&registry(RELEASE)).unwrap();
-            entry["service"][field] = json!(value);
-            assert!(
-                configured_service(&entry.to_string()).is_err(),
-                "{field}: {value}"
-            );
-        }
     }
 
     #[test]
@@ -642,6 +603,20 @@ mod tests {
         )
         .unwrap_err()
         .contains("byte limit"));
+        for invalid in [
+            r#"{"answers": []}"#,
+            r#"{"answers": [{"question_id": "q", "basis": "observed", "text": " "}]}"#,
+            r#"{"answers": [{"question_id": "q", "basis": "observed", "text": "x",
+                "disclosure": {"tier": "context_only", "phrasing": " "}}]}"#,
+        ] {
+            fs::write(&answers, invalid).unwrap();
+            assert!(run(
+                &["discovery", "submit", &survey, "--init-tx", tx, file],
+                key
+            )
+            .unwrap_err()
+            .contains("no blank text or phrasing"));
+        }
         fs::write(&answers, "{").unwrap();
         assert!(run(
             &["discovery", "submit", &survey, "--init-tx", tx, file],
@@ -782,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn report_requires_a_transaction_before_any_network_call() {
+    fn no_option_overrides_the_pinned_release() {
         for removed in ["--release", "--rpc", "--network", "--project", "--contract"] {
             assert!(Cli::try_parse_from([
                 "discovery",

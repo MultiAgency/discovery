@@ -2,11 +2,10 @@
 //!
 //! Register a slot before writing a response. Closing fixes the registration
 //! list, which names every slot ever written. Writers only insert, so a stored
-//! response is already immutable; freezing marks each empty registered slot so
-//! its delayed writer can never insert. Discard replaces contents with
-//! tombstones that late CAS/inserts cannot overwrite; an empty slot's freeze
-//! marker already holds nothing and fences inserts, so it stays. Neither
-//! depends on storage listing.
+//! response is already immutable; freezing fences each empty registered slot
+//! so its delayed writer can never insert. Discard replaces contents with the
+//! same empty fence, which late CAS/inserts cannot overwrite. Neither depends
+//! on storage listing.
 //!
 //! OutLayer runs fail on their 126th storage call: twice on testnet, call
 //! #126 hung for the 30 s client timeout after 125 calls had succeeded, once a
@@ -24,19 +23,12 @@ const RETRIES: usize = 8;
 
 /// Registrations one survey admits. A run must stay at or under 100 storage
 /// calls: 125 succeeded on testnet and the 126th failed, so a quarter stays in
-/// reserve. Finalization costs 8 calls plus 3 per registration, or 5 for a slot
+/// reserve. Finalization costs 7 calls plus 3 per registration, or 5 for a slot
 /// whose delayed writer inserts while it is being frozen; 18 keeps even every
-/// slot racing within 98. Registrations, not distinct responses, are counted,
+/// slot racing within 97. Registrations, not distinct responses, are counted,
 /// because each costs finalization the same work: racing identical submissions
 /// and interrupted ones each use a place.
 pub const REGISTRATIONS: u64 = 18;
-
-/// Serialized response bytes one survey can hold, so every admitted response
-/// fits one synthesis job (180 s, 256 MB). The registration limit enforces it:
-/// a survey can never hold more than this.
-pub const BUDGET: usize = 256 * 1024;
-const _: () =
-    assert!(REGISTRATIONS as usize * discovery_protocol::envelope::MAX_RESPONSE <= BUDGET);
 
 #[derive(Serialize, Deserialize)]
 struct Collection {
@@ -56,9 +48,9 @@ pub enum Slot {
     Open {
         submission: Response,
     },
-    /// An empty registered slot, fenced at closure.
-    Frozen,
-    Discarded,
+    /// Empty and fenced: frozen at closure, or emptied after release. A
+    /// fence only ever follows a stored report or a closed collection.
+    Fenced,
 }
 
 /// What freezing read: the responses, and each slot's stored bytes, so cleanup
@@ -94,16 +86,19 @@ pub fn is_closed<P: Platform>(p: &P, id: &str) -> Result<bool> {
     Ok(state(p, id)?.1.closed)
 }
 
-/// A slot that already exists was registered, so a later identical retry
-/// uses no place. Identical submissions racing before either writes, or a
-/// retry after a crash between registration and the write, register the slot
-/// again and use another place each time; `close` deduplicates slots, so only
-/// capacity is lost. Fixing that needs a lease or a list walk. An empty
-/// registered slot is frozen empty by finalization.
+/// Whether admission is closed, and whether every registration is used.
+pub fn admission<P: Platform>(p: &P, id: &str) -> Result<(bool, bool)> {
+    let collection = state(p, id)?.1;
+    Ok((collection.closed, collection.registrations >= REGISTRATIONS))
+}
+
+/// Admit a new slot. Callers skip slots that already exist, so an identical
+/// retry uses no place. Identical submissions racing before either writes, or
+/// a retry after a crash between registration and the write, register the
+/// slot again and use another place each time; `close` deduplicates slots, so
+/// only capacity is lost. Fixing that needs a lease or a list walk. An empty
+/// registered slot is fenced by finalization.
 pub fn register<P: Platform>(p: &P, id: &str, slot: &str) -> Result<()> {
-    if p.get(slot)?.is_some() {
-        return Ok(());
-    }
     let key = collection_key(id);
     for _ in 0..RETRIES {
         let (raw, mut collection) = state(p, id)?;
@@ -186,8 +181,7 @@ pub fn close<P: Platform>(p: &P, id: &str) -> Result<Vec<String>> {
 pub fn seal_slot<P: Platform>(p: &P, key: &str, slot: &Slot) -> Result<Vec<u8>> {
     let (phase, plaintext) = match slot {
         Slot::Open { submission } => (1, serde_json::to_vec(submission)?),
-        Slot::Frozen => (2, Vec::new()),
-        Slot::Discarded => (3, Vec::new()),
+        Slot::Fenced => (2, Vec::new()),
     };
     let mut raw = vec![phase];
     raw.extend(p.encrypt(&plaintext, format!("{key}:{phase}").as_bytes())?);
@@ -198,7 +192,7 @@ pub fn read_slot<P: Platform>(p: &P, key: &str, raw: &[u8]) -> Result<Slot> {
     let Some((&phase, ciphertext)) = raw.split_first() else {
         return Err(Error("stored response is unreadable".into()));
     };
-    if !(1..=3).contains(&phase) {
+    if !(1..=2).contains(&phase) {
         return Err(Error("stored response is unreadable".into()));
     }
     let plaintext = p.decrypt(ciphertext, format!("{key}:{phase}").as_bytes())?;
@@ -207,8 +201,7 @@ pub fn read_slot<P: Platform>(p: &P, key: &str, raw: &[u8]) -> Result<Slot> {
             submission: serde_json::from_slice(&plaintext)
                 .map_err(|_| Error("stored response is unreadable".into()))?,
         }),
-        2 if plaintext.is_empty() => Ok(Slot::Frozen),
-        3 if plaintext.is_empty() => Ok(Slot::Discarded),
+        2 if plaintext.is_empty() => Ok(Slot::Fenced),
         _ => Err(Error("stored response is unreadable".into())),
     }
 }
@@ -228,18 +221,15 @@ pub fn freeze<P: Platform>(p: &P, id: &str) -> Result<Frozen> {
             if let Some(raw) = p.get(&key)? {
                 match read_slot(p, &key, &raw)? {
                     Slot::Open { submission } => frozen.submissions.push(submission),
-                    Slot::Frozen => {}
-                    Slot::Discarded => {
-                        return Err(Error(
-                            "survey was already released; retry finalization".into(),
-                        ))
-                    }
+                    // Empty, or emptied after another finalizer stored its
+                    // report, which this run will then return instead.
+                    Slot::Fenced => {}
                 }
                 stored = Some(raw);
                 break;
             }
             // A writer that inserts first wins and is read on the next pass.
-            let marker = seal_slot(p, &key, &Slot::Frozen)?;
+            let marker = seal_slot(p, &key, &Slot::Fenced)?;
             if p.set_if_absent(&key, &marker)? {
                 stored = Some(marker);
                 break;
@@ -257,9 +247,9 @@ pub fn freeze<P: Platform>(p: &P, id: &str) -> Result<Frozen> {
 
 /// Replace response contents and key material with permanent empty markers.
 /// Never delete these fences: a delayed writer may still hold an old snapshot.
-/// An empty slot's freeze marker is already such a fence and is left in place.
-/// With `frozen`, each slot is replaced from the bytes freezing read; a slot
-/// changed since (another finalizer's tombstone) falls back to reading it.
+/// An empty slot's freeze fence is left in place. With `frozen`, each slot is
+/// replaced from the bytes freezing read; a slot changed since (another
+/// finalizer's fence) falls back to reading it.
 /// Without it, after an interrupted cleanup, the registration list is read.
 pub fn discard<P: Platform>(p: &P, id: &str, frozen: Option<&Frozen>) -> Result<()> {
     let slots: Vec<(String, Option<&[u8]>)> = match frozen {
@@ -271,12 +261,9 @@ pub fn discard<P: Platform>(p: &P, id: &str, frozen: Option<&Frozen>) -> Result<
         None => close(p, id)?.into_iter().map(|key| (key, None)).collect(),
     };
     for (key, known) in slots {
-        let marker = seal_slot(p, &key, &Slot::Discarded)?;
+        let marker = seal_slot(p, &key, &Slot::Fenced)?;
         fence(p, &key, &marker, known, |raw| {
-            Ok(matches!(
-                read_slot(p, &key, raw)?,
-                Slot::Discarded | Slot::Frozen
-            ))
+            Ok(matches!(read_slot(p, &key, raw)?, Slot::Fenced))
         })?;
     }
     let key = secret_key(id);
@@ -318,10 +305,7 @@ fn fence<P: Platform>(
 pub fn assert_discarded(m: &crate::platform::memory::Memory, id: &str) {
     for key in m.list(&responses_prefix(id)) {
         let raw = m.get(&key).unwrap().unwrap();
-        assert!(matches!(
-            read_slot(m, &key, &raw).unwrap(),
-            Slot::Discarded | Slot::Frozen
-        ));
+        assert!(matches!(read_slot(m, &key, &raw).unwrap(), Slot::Fenced));
     }
     assert_eq!(
         Records(m).require(&secret_key(id), "key marker").unwrap(),

@@ -42,7 +42,6 @@ pub struct Created {
     pub survey_id: String,
     /// Hex X25519 public key respondents encrypt to.
     pub public_key: String,
-    pub deadline_ns: u64,
 }
 
 /// Fixed output: no hint whether this contribution was a retry.
@@ -70,7 +69,6 @@ pub fn init<P: Platform>(p: &P, definition: SurveyDefinition) -> Result<Created>
     Ok(Created {
         survey_id: id,
         public_key: hex::encode(key.public()),
-        deadline_ns: definition.deadline_ns,
     })
 }
 
@@ -101,26 +99,29 @@ pub fn submit<P: Platform>(p: &P, survey_id: &str, envelope_b64: &str) -> Result
     let digest = discovery_protocol::sha256(&canonical);
     let tag = p.mac(format!("{survey_id}:{}", hex::encode(digest)).as_bytes())?;
     let key = format!("{}{}", responses_prefix(survey_id), hex::encode(tag));
-    collection::register(p, survey_id, &key)?;
-    if collection::is_closed(p, survey_id)? {
-        return Err(Error("survey is closed".into()));
+    // An identical earlier submission is accepted once; a fenced slot means
+    // collection closed and must never be overwritten by a delayed submission.
+    let existing = |stored: Vec<u8>| match collection::read_slot(p, &key, &stored)? {
+        Slot::Open { .. } => Ok(Accepted { accepted: true }),
+        Slot::Fenced => Err(Error("survey is closed".into())),
+    };
+    if let Some(stored) = p.get(&key)? {
+        return existing(stored);
     }
+    // Registration fails once collection has closed; a slot registered before
+    // that is on the closed list, so freezing reads or fences it.
+    collection::register(p, survey_id, &key)?;
     let slot = Slot::Open {
         submission: response,
     };
-    let updated = collection::seal_slot(p, &key, &slot)?;
-    if p.set_if_absent(&key, &updated)? {
+    if p.set_if_absent(&key, &collection::seal_slot(p, &key, &slot)?)? {
         return Ok(Accepted { accepted: true });
     }
-    // A concurrent retry may have inserted it; a frozen/tombstoned slot is
-    // a closure fence and must never be overwritten by a delayed submission.
-    let stored = p
-        .get(&key)?
-        .ok_or_else(|| Error("response slot is missing".into()))?;
-    match collection::read_slot(p, &key, &stored)? {
-        Slot::Open { .. } => Ok(Accepted { accepted: true }),
-        _ => Err(Error("survey is closed".into())),
-    }
+    // A concurrent identical submission or a freeze fence got there first.
+    existing(
+        p.get(&key)?
+            .ok_or_else(|| Error("response slot is missing".into()))?,
+    )
 }
 
 fn rejected(reason: &str) -> Error {
@@ -134,10 +135,12 @@ pub fn status<P: Platform>(p: &P, survey_id: &str) -> Result<SurveyStatus> {
         .get(&secret_key(survey_id))?
         .is_some_and(|bytes| !bytes.is_empty());
     let report_released = p.get(&report_key(survey_id))?.is_some();
+    let (closed, full) = collection::admission(p, survey_id)?;
     Ok(SurveyStatus {
         survey_id: survey_id.into(),
         definition,
-        closed: collection::is_closed(p, survey_id)?,
+        closed,
+        full,
         key_present,
         report_released,
     })
@@ -359,7 +362,7 @@ mod tests {
         let s = status(&https(&m), &c.survey_id).unwrap();
         assert!(s.key_present);
         assert_eq!(s.definition, definition());
-        assert!(!s.closed && !s.report_released);
+        assert!(!s.closed && !s.full && !s.report_released);
     }
 
     // The deadline is the earliest finalization time, not an HTTPS cutoff.
@@ -416,7 +419,7 @@ mod tests {
             let raw = m.get(&empty(n)).unwrap().unwrap();
             assert!(matches!(
                 collection::read_slot(&m, &empty(n), &raw).unwrap(),
-                Slot::Frozen
+                Slot::Fenced
             ));
             assert!(!m.set_if_absent(&empty(n), b"delayed response").unwrap());
         }
@@ -510,6 +513,8 @@ mod tests {
         }
         let full = send(&m, &c, &publishable("one too many")).unwrap_err();
         assert_eq!(full.0, "survey is full");
+        let s = status(&https(&m), &c.survey_id).unwrap();
+        assert!(s.full && !s.closed && s.key_present);
         // A re-encrypted retry of an admitted response is still accepted.
         assert!(send(&m, &c, &publishable("response 0")).unwrap().accepted);
         assert_eq!(responses(&m, &c.survey_id), places);
@@ -535,15 +540,5 @@ mod tests {
         let full = send(&m, &c, &publishable("one too many"));
         assert_eq!(full.unwrap_err().0, "survey is full");
         assert_eq!(frozen(&m, &c).len(), places - 1);
-    }
-
-    #[test]
-    fn oversized_responses_cannot_be_sealed() {
-        let (_, c) = created();
-        let hash = definition().hash().unwrap();
-        let public: [u8; 32] = hex::decode(&c.public_key).unwrap().try_into().unwrap();
-        let text = "x".repeat(discovery_protocol::envelope::MAX_RESPONSE);
-        assert!(seal(&public, text.as_bytes(), &hash).is_ok());
-        assert!(seal(&public, format!("{text}x").as_bytes(), &hash).is_err());
     }
 }

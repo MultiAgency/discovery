@@ -4,7 +4,7 @@
 # invented answers, after the release owner is locked: `discovery verify` and
 # `discovery report` refuse unlocked releases and surveys created before the lock.
 #
-#   scripts/smoke.sh create NAME [MINUTES] [TITLE]  new survey on TARGET, verified
+#   scripts/smoke.sh create NAME [MINUTES]          new survey on TARGET, verified
 #   scripts/smoke.sh early NAME                     finalize before the deadline (must fail)
 #   scripts/smoke.sh submit NAME ANSWERS.json       encrypted submission (DISCOVERY_PAYMENT_KEY)
 #   scripts/smoke.sh finalize NAME                  finalize, fetch the verified report, check it
@@ -160,7 +160,7 @@ check_public() {
   # The uppercase marker starts only context-only fixture text, which must
   # never appear verbatim; publishable fixtures may be quoted and carry none.
   if grep -Eq 'SYNTHETIC' "$file" ||
-    grep -Eiq 'example\.invalid|/home/|team-lead|88231947|10\.20\.30\.40|qa-runner' "$file"; then
+    grep -Eiq 'example\.invalid|/home/|team-lead|88231947|10\.20\.30\.40|qa-runner|build-farm|synthetic-(project|corp)|payments team' "$file"; then
     printf '  FAIL fixture text or identifier in %s\n' "$file"; failed=1
   fi
   if grep -Eq '\bS[0-9]+\.[0-9]+\b' "$file"; then
@@ -199,7 +199,7 @@ prepare_init() {
   mkdir -p "$dir"
   deadline=$(( $(date +%s) + $2 * 60 ))
   # jq would round a nanosecond timestamp through a double, so substitute it as text.
-  jq --arg t "$3" --arg target "$TARGET" '(if $t == "" then . else .title = $t end)
+  jq --arg t "$3" --arg target "$TARGET" '.title = $t
       | .target = {repo: ($target | split("#")[0]), number: ($target | split("#")[1] | tonumber)}' \
     "$SYNTHETIC/definition.json" |
     sed "s/\"deadline_ns\": 0,/\"deadline_ns\": ${deadline}000000000,/" > "$dir/definition.json"
@@ -211,14 +211,14 @@ prepare_init() {
 }
 
 cmd_create() {
-  local name="${1:?NAME}" minutes="${2:-15}" title="${3:-}" dir survey hash
+  local name="${1:?NAME}" minutes="${2:-15}" dir survey hash
   need discovery near jq curl
   check_cli
   dir=$(survey_dir "$name")
   if [[ -e "$dir/init-request.json" ]]; then
     printf '  resuming %s; use a new NAME for a new survey\n' "$name"
   else
-    prepare_init "$dir" "$minutes" "${title:-Smoke test $name}"
+    prepare_init "$dir" "$minutes" "Smoke test $name"
   fi
   survey=$(cat "$dir/survey_id")
   hash=$(sign_and_send "$dir" init "$dir/init-request.json" '0.1 NEAR')
@@ -356,7 +356,7 @@ main() {
   shift || true
   case "$command" in
     create | early | submit | finalize | refinalize | check | status | workload) "cmd_$command" "$@" ;;
-    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
   esac
 }
 

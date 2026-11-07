@@ -19,6 +19,9 @@ pub struct SurveyStatus {
     pub survey_id: String,
     pub definition: definition::SurveyDefinition,
     pub closed: bool,
+    /// Every registration is used: new responses are refused, while a retry
+    /// of an admitted one still succeeds.
+    pub full: bool,
     /// Whether the service still holds the survey decryption key.
     pub key_present: bool,
     pub report_released: bool,

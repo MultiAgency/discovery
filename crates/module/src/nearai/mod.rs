@@ -1,25 +1,25 @@
 //! Confidential inference for `Finalize` on NEAR AI Cloud, verified inside
 //! the enclave.
 //!
-//! The first inference call fetches fresh attestation evidence and verifies it:
-//! Intel TDX quotes for the gateway and every model candidate, NVIDIA's signed
-//! GPU verdict, all bound to our nonce. Which software runs on that hardware is
-//! NEAR AI's deployment, trusted rather than independently approved here: a
-//! quote proves hardware and measured configuration, not reviewed model code.
-//! Each request is end-to-end
-//! encrypted to the attested model key (E2EE v2), so the gateway relays only
-//! ciphertext, and a reply is used only after the model enclave's signature
-//! over the exact request and response bytes checks out. Errors are public
-//! on-chain output, so they carry no request, reply or provider text.
+//! The first inference call fetches fresh attestation evidence for the model
+//! and verifies it: an Intel TDX quote bound to our nonce and the model's
+//! signing key, and NVIDIA's signed GPU verdict for that nonce. Which software runs on that
+//! hardware is NEAR AI's deployment, trusted rather than independently approved
+//! here: a quote proves hardware and measured configuration, not reviewed model
+//! code. Each request is end-to-end encrypted to the attested model key (E2EE
+//! v2), so the gateway relays only ciphertext and is not itself checked, and a
+//! reply is used only after the model enclave's signature over the exact
+//! request and response bytes checks out. Errors are public on-chain output,
+//! so they carry no request, reply or provider text.
 //!
 //! `attest`, `e2ee`, `net` and `sign` derive from
-//! `MultiAgency/private-ai@dd469a5` (`app/src`), with local changes: every
-//! candidate is verified and duplicate signers are rejected; model platforms
-//! must be fully patched; weak Ed25519 keys and non-contributory X25519
-//! exchanges are refused; only text messages are supported; tool calls,
-//! overrides, offline inputs and persisted receipts are removed. Tests inject a
-//! quote verifier and sign synthetic NVIDIA-format JWTs; they check protocol
-//! behavior, not real hardware or a deployed service.
+//! `MultiAgency/private-ai@dd469a5` (`app/src`), with local changes: only the
+//! model requests are encrypted to is verified, and its platform must be fully
+//! patched; weak Ed25519 keys and non-contributory X25519 exchanges are
+//! refused; only text messages are supported; tool calls, overrides, offline
+//! inputs and persisted receipts are removed. Tests inject a quote verifier and
+//! sign synthetic NVIDIA-format JWTs; they check protocol behavior, not real
+//! hardware or a deployed service.
 //!
 //! Reference: https://docs.near.ai/cloud/verification/cloud-api/model-attestations
 
@@ -63,8 +63,7 @@ impl Confidential {
             let key = std::env::var("NEARAI_API_KEY")
                 .map_err(|_| Error("NEARAI_API_KEY is not set".into()))?;
             let api = net::NearAi::new(key);
-            let attestation = api.attest(MODEL).map_err(fail("attestation"))?;
-            let model_key = attestation.models[0].public_key.clone();
+            let model_key = api.attest(MODEL).map_err(fail("attestation"))?;
             // Single-threaded, with no callbacks into this cell meanwhile.
             let _ = self.connection.set((api, model_key));
         }

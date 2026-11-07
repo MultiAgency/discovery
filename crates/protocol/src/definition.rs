@@ -74,6 +74,15 @@ impl SurveyDefinition {
                 return err(format!("duplicate question id {:?}", q.id));
             }
         }
+        // A blank term would match every report and withhold it.
+        if self
+            .rules
+            .withheld_terms
+            .iter()
+            .any(|t| t.trim().is_empty())
+        {
+            return err("withheld_terms must not be blank");
+        }
         Ok(())
     }
 
@@ -143,6 +152,11 @@ mod tests {
         let mut d = sample();
         d.target.number = 0;
         assert!(d.validate().is_err());
+        for blank in ["", " "] {
+            let mut d = sample();
+            d.rules.withheld_terms = vec![blank.into()];
+            assert!(d.validate().is_err(), "{blank:?}");
+        }
     }
 
     #[test]

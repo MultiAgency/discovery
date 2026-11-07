@@ -22,8 +22,6 @@ pub trait Platform {
     fn decrypt(&self, ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>>;
     fn mac(&self, data: &[u8]) -> Result<Vec<u8>>;
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    #[cfg(test)]
-    fn set(&self, key: &str, value: &[u8]) -> Result<()>;
     fn set_if_absent(&self, key: &str, value: &[u8]) -> Result<bool>;
     /// Compare the ciphertext read from this key, never re-encrypted plaintext.
     fn compare_and_swap(&self, key: &str, expected: &[u8], value: &[u8]) -> Result<bool>;
@@ -95,11 +93,6 @@ impl Platform for Host {
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         storage::get_raw(key).map_err(storage_err)
-    }
-
-    #[cfg(test)]
-    fn set(&self, key: &str, value: &[u8]) -> Result<()> {
-        storage::set_raw(key, value).map_err(storage_err)
     }
 
     fn set_if_absent(&self, key: &str, value: &[u8]) -> Result<bool> {
@@ -182,6 +175,11 @@ pub mod memory {
             Ok(())
         }
 
+        /// Overwrite a raw value, as a crash or tampering could leave it.
+        pub fn set(&self, key: &str, value: &[u8]) {
+            self.store.borrow_mut().insert(key.into(), value.into());
+        }
+
         /// Raw keys under `prefix`. Tests only: the module never lists storage.
         pub fn list(&self, prefix: &str) -> Vec<String> {
             self.store
@@ -219,10 +217,6 @@ pub mod memory {
         fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
             self.call();
             Ok(self.store.borrow().get(key).cloned())
-        }
-        fn set(&self, key: &str, value: &[u8]) -> Result<()> {
-            self.store.borrow_mut().insert(key.into(), value.into());
-            Ok(())
         }
         fn set_if_absent(&self, key: &str, value: &[u8]) -> Result<bool> {
             self.intercept(key)?;

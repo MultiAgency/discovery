@@ -18,9 +18,8 @@ serde_json.workspace = true
 hex.workspace = true
 base64.workspace = true
 anyhow = "1"
-getrandom.workspace = true
 asn1_der = { version = "0.7", default-features = false, features = ["native_types"] }
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chacha20poly1305.workspace = true
 dcap-qvl = { version = "0.6.5", default-features = false, features = ["std", "rustcrypto", "default-x509"] }
 ed25519-dalek = { version = "2", default-features = false }
 hkdf.workspace = true
@@ -28,4 +27,4 @@ p384 = { version = "0.13", default-features = false, features = ["ecdsa", "std"]
 pem = { version = "3", default-features = false }
 sha2.workspace = true
 wasip2 = "2"
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+x25519-dalek.workspace = true

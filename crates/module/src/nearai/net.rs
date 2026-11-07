@@ -17,7 +17,7 @@ use wasip2::http::outgoing_handler;
 use wasip2::http::types::{Fields, Method, OutgoingBody, OutgoingRequest, Scheme};
 use wasip2::io::streams::StreamError;
 
-use crate::nearai::attest::{self, Attestation, Nvidia, Options, Verified, NRAS};
+use crate::nearai::attest::{self, Nvidia, Options, Verified, NRAS};
 use crate::nearai::e2ee::Session;
 use crate::nearai::sign::{check_signature, sha256, signed_text};
 
@@ -154,7 +154,8 @@ fn issuer_chain(response: &Response, names: &[&str]) -> Result<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
                 out.push(b);
                 i += 3;
                 continue;
@@ -185,16 +186,15 @@ fn collateral(quote: &[u8]) -> Result<QuoteCollateralV3> {
         .ok_or_else(|| anyhow!("Intel extension not found"))?;
     let fmspc = fmspc(&extension)?;
     let ca = cert.pck_ca().unwrap_or(PckCa::Processor).as_id_str();
-    let tee = if parsed.header.is_sgx() { "sgx" } else { "tdx" };
 
     let crl = get(&format!(
         "{PCCS}/sgx/certification/v4/pckcrl?ca={ca}&encoding=der"
     ))?;
     let tcb = get(&format!(
-        "{PCCS}/{tee}/certification/v4/tcb?fmspc={fmspc}&update=standard"
+        "{PCCS}/tdx/certification/v4/tcb?fmspc={fmspc}&update=standard"
     ))?;
     let qe = get(&format!(
-        "{PCCS}/{tee}/certification/v4/qe/identity?update=standard"
+        "{PCCS}/tdx/certification/v4/qe/identity?update=standard"
     ))?;
     let root = get(&format!("{PCCS}/sgx/certification/v4/rootcacrl"))?;
     let tcb_json: Value =
@@ -358,13 +358,16 @@ impl NearAi {
                 }
                 Err(e) => last = e,
             }
-            sleep_ms(attempt * 1000);
+            if attempt < 5 {
+                sleep_ms(attempt * 1000);
+            }
         }
         Err(last)
     }
 
-    /// Fetch fresh evidence and verify every returned model before inference.
-    pub fn attest(&self, model: &str) -> Result<Attestation> {
+    /// Fetch fresh evidence and verify the model before inference; returns
+    /// its attested signing key.
+    pub fn attest(&self, model: &str) -> Result<String> {
         let nonce = hex::encode(discovery_protocol::random_bytes::<32>()?);
         let report = self.attestation_report(model, &nonce)?;
         attest::verify_attestation(

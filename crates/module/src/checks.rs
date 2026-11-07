@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 use discovery_protocol::definition::SurveyDefinition;
-use discovery_protocol::response::{Answer, Disclosure, Response};
+use discovery_protocol::response::{Basis, Disclosure, Response};
 
 fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
@@ -55,18 +55,23 @@ pub struct Material {
 }
 
 /// One interpretation of disclosure permissions for synthesis, grounding and checks.
-pub struct Prepared<'a> {
+pub struct Prepared {
     pub material: Material,
     pub respondents: Vec<Value>,
     pub authorized: Vec<Value>,
     pub confidential: Vec<Value>,
-    /// All labels are private; only authorized answers can ground findings.
-    pub sources: BTreeMap<String, Option<&'a Answer>>,
+    /// All labels are private; only authorized answers can ground findings,
+    /// and a finding's public basis comes from theirs.
+    pub sources: BTreeMap<String, Option<Basis>>,
 }
 
-impl<'a> Prepared<'a> {
-    pub fn new(definition: &SurveyDefinition, responses: &'a [Response]) -> Self {
-        let mut forbidden = Vec::new();
+impl Prepared {
+    pub fn new(definition: &SurveyDefinition, responses: &[Response]) -> Self {
+        // Context-only text is confidential; publishable text the organizer
+        // forbade quoting is public but must be reworded. Both forbid
+        // n-grams, but only confidential text forbids identifiers.
+        let mut private = Vec::new();
+        let mut paraphrased = Vec::new();
         let mut allowed = vec![definition.title.as_str()];
         allowed.extend(definition.questions.iter().map(|q| q.prompt.as_str()));
         let mut respondents = Vec::new();
@@ -83,7 +88,7 @@ impl<'a> Prepared<'a> {
                     Disclosure::Publishable => {
                         // The synthesis and audit inputs label quotable text the same way.
                         let label = if definition.rules.no_direct_quotes {
-                            forbidden.push(a.text.as_str());
+                            paraphrased.push(a.text.as_str());
                             "paraphrase_only"
                         } else {
                             allowed.push(a.text.as_str());
@@ -92,10 +97,10 @@ impl<'a> Prepared<'a> {
                         authorized.push(json!({ label: a.text }));
                         draft["tier"] = json!("publishable");
                         draft[label] = json!(a.text);
-                        Some(a)
+                        Some(a.basis)
                     }
                     Disclosure::ContextOnly { phrasing } => {
-                        forbidden.push(a.text.as_str());
+                        private.push(a.text.as_str());
                         allowed.extend(phrasing.iter().map(String::as_str));
                         if let Some(p) = phrasing {
                             authorized.push(json!({"approved_phrasing": p}));
@@ -104,27 +109,34 @@ impl<'a> Prepared<'a> {
                         draft["tier"] = json!("context_only");
                         draft["raw_context"] = json!(a.text);
                         draft["may_surface_as"] = json!(phrasing);
-                        phrasing.as_ref().map(|_| a)
+                        phrasing.as_ref().map(|_| a.basis)
                     }
                 };
                 sources.insert(id, source);
                 answers.push(draft);
             }
-            respondents.push(json!({"respondent": format!("R{}", r + 1), "answers": answers}));
+            // Grouped per respondent, unlabelled, so no label can tie
+            // findings to one person.
+            respondents.push(json!({ "answers": answers }));
         }
         let allowed_grams: BTreeSet<_> = allowed.iter().flat_map(|t| ngrams(t)).collect();
-        let allowed_ids: BTreeSet<_> = allowed.iter().flat_map(|t| identifiers(t)).collect();
+        let public_ids: BTreeSet<_> = allowed
+            .iter()
+            .chain(&paraphrased)
+            .flat_map(|t| identifiers(t))
+            .collect();
         Self {
             material: Material {
-                forbidden_grams: forbidden
+                forbidden_grams: private
                     .iter()
+                    .chain(&paraphrased)
                     .flat_map(|t| ngrams(t))
                     .filter(|g| !allowed_grams.contains(g))
                     .collect(),
-                forbidden_ids: forbidden
+                forbidden_ids: private
                     .iter()
                     .flat_map(|t| identifiers(t))
-                    .filter(|i| !allowed_ids.contains(i))
+                    .filter(|i| !public_ids.contains(i))
                     .collect(),
                 withheld: definition.rules.withheld_terms.clone(),
             },
@@ -350,6 +362,34 @@ mod tests {
             ..Default::default()
         };
         assert!(!material(strict).violations(&[PUBLIC]).is_empty());
+    }
+
+    /// Forbidding quotes asks for rewording; it doesn't make published
+    /// identifiers confidential.
+    #[test]
+    fn no_quotes_keeps_publishable_identifiers_public() {
+        let strict = definition(DisclosureRules {
+            no_direct_quotes: true,
+            ..Default::default()
+        });
+        let m = Prepared::new(
+            &strict,
+            &[
+                response(
+                    Disclosure::Publishable,
+                    "The installer at northwind.dev stops early",
+                ),
+                response(
+                    Disclosure::ContextOnly { phrasing: None },
+                    "I tested it from velvet.internal and northwind.dev",
+                ),
+            ],
+        )
+        .material;
+        assert!(m
+            .violations(&["Setup on northwind.dev should list missing settings."])
+            .is_empty());
+        assert!(!m.violations(&["Seen from velvet.internal."]).is_empty());
     }
 
     #[test]

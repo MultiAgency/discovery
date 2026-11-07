@@ -23,8 +23,10 @@ discovery verify <survey> --init-tx <init_tx> --target OWNER/REPO#NUMBER
 ```
 
 Continue only if verification succeeds, its `release` matches the announcement,
-`accepting_responses` is true and the target is the intended issue. Read the
-questions and restrictions, and explain the service policy to the owner.
+`accepting_responses` is true and the target is the intended issue. If it is
+false only because `full` is true, a new response will be refused, but a retry
+of answers already submitted is still accepted. Read the questions and
+restrictions, and explain the service policy to the owner.
 
 ## Interview and approve
 

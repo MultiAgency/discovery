@@ -1,8 +1,3 @@
 .outlayer*/
 target/
 coordination/
-
-# local
-.spike-secrets/
-respondent-secret
-custody-anchor.json

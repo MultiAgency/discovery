@@ -60,7 +60,7 @@ impl Llm for Scripted {
         "scripted-local-drafts (no model)"
     }
     fn json(&self, system: &str, user: &str) -> Result<Value> {
-        if system.starts_with("You audit a report") {
+        if system == crate::finalize::AUDIT {
             return Ok(json!({ "leaks": [] }));
         }
         let draft = self.drafts.borrow_mut().remove(0);

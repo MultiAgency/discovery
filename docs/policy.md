@@ -63,16 +63,18 @@ from different agents.
 Each response is at most 4,092 bytes of serialized JSON, padded to one 4 KiB
 size (including its length prefix). A survey admits 18 registrations, so at
 most about 74 KB of responses; beyond that, submissions fail with "survey is
-full". There is no sampling. Retries of admitted responses still succeed.
+full", and `discovery verify` shows `full: true`. There is no sampling. Retries
+of admitted responses still succeed.
 Identical submissions that race, or a retry after an interrupted submission,
 may use another place each time; they still contribute once.
 
 The limit comes from storage, not the model. On testnet, OutLayer failed
 finalization runs on their 126th storage call, which hung until the 30-second
-client timeout; the cause is unresolved. Finalization costs 8 storage calls
+client timeout; the cause is unresolved. Finalization costs 7 storage calls
 plus 3 per registration, or 5 for a slot whose delayed writer inserts while it
-is being frozen. At 18 registrations it needs 62 calls, and 98 if every slot
-races, a quarter below that point. Finalization makes up to six model requests
+is being frozen. At 18 registrations it needs 61 calls, and 97 if every slot
+races, within a 100-call budget that keeps a quarter of reserve below that
+failure. Finalization makes up to six model requests
 (three drafts, three audits) in one 180-second job.
 
 Flooding with the public payment key can fill the survey early instead of
@@ -96,10 +98,11 @@ creation and finalization transactions came from the organizer, ran the
 registered project and build, and that at that block the build was the project's
 only version and its owner was an initialized account with no access keys or
 contract code. Before sending any response content, the module checks the
-gateway's and model's Intel TDX quotes, NVIDIA's GPU verdict and the model's
-attested signing key, all bound to a fresh nonce. It encrypts each request to
-that key and uses a reply only after the model's signature over the exact
-request and reply checks out.
+model's Intel TDX quote, which binds a fresh nonce, the model's signing key and
+its attested configuration, and NVIDIA's GPU verdict for the same nonce. It
+encrypts each request to that key and uses a reply only after the model's signature over the exact
+request and reply checks out. NEAR AI's gateway relays only that ciphertext and
+is not itself checked.
 
 The MVP trusts NEAR AI to manage which software runs on that attested hardware.
 NEAR AI deploys model containers frequently, and applications choose their own
@@ -108,11 +111,3 @@ Hardware attestation does not establish that independently reviewed model code
 processed a response; this service does not check that. Our own code is
 independently pinned: the locked OutLayer release enforces contributor
 permissions, publication checks and recoverable cleanup.
-
-## MVP versus concept
-
-- The organizer finalizes after the deadline; nothing is scheduled.
-- The organizer posts the verified report with `gh`; the service and CLI make
-  no GitHub calls, though every survey targets a GitHub issue.
-- Responses stay encrypted until finalization succeeds, with no independent expiry.
-- Confidentiality does not guarantee anonymity; approved details may identify someone.

@@ -53,14 +53,13 @@ impl Default for Disclosure {
 }
 
 impl Response {
-    pub fn validate(&self, definition: &SurveyDefinition) -> Result<()> {
+    /// Checks that need no survey definition, so a client can run them
+    /// before any network call.
+    pub fn validate_answers(&self) -> Result<()> {
         if self.answers.is_empty() {
             return err("no answers");
         }
         for a in &self.answers {
-            if !definition.questions.iter().any(|q| q.id == a.question_id) {
-                return err(format!("unknown question id {:?}", a.question_id));
-            }
             if a.text.trim().is_empty() {
                 return err(format!("empty answer to {:?}", a.question_id));
             }
@@ -71,6 +70,18 @@ impl Response {
             }
         }
         Ok(())
+    }
+
+    pub fn validate(&self, definition: &SurveyDefinition) -> Result<()> {
+        self.validate_answers()?;
+        match self
+            .answers
+            .iter()
+            .find(|a| !definition.questions.iter().any(|q| q.id == a.question_id))
+        {
+            Some(a) => err(format!("unknown question id {:?}", a.question_id)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -122,6 +133,27 @@ mod tests {
         let mut bad = r.clone();
         bad.answers[0].question_id = "nope".into();
         assert!(bad.validate(&d).is_err());
+        assert!(bad.validate_answers().is_ok());
+        for broken in [
+            Response { answers: vec![] },
+            Response {
+                answers: vec![Answer {
+                    text: " ".into(),
+                    ..r.answers[0].clone()
+                }],
+            },
+            Response {
+                answers: vec![Answer {
+                    disclosure: Disclosure::ContextOnly {
+                        phrasing: Some(" ".into()),
+                    },
+                    ..r.answers[0].clone()
+                }],
+            },
+        ] {
+            assert!(broken.validate_answers().is_err());
+            assert!(broken.validate(&d).is_err());
+        }
         let mut extra = serde_json::to_value(&r).unwrap();
         extra["extra"] = serde_json::json!(1);
         assert!(serde_json::from_value::<Response>(extra).is_err());

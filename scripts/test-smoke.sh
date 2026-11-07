@@ -156,11 +156,8 @@ STUB_VERIFY_FAILS=1 \
 STUB_REPORT='Seen on qa-runner-3.internal.example.invalid.' \
   expect "a verified report with fixture identifiers fails" fails fetch_report "$dir" HashOfTheSignedTx1111111111111111111111 "$tmp/r.md"
 
-# prepare_init: no TITLE keeps the fixture's title; a TITLE replaces it.
-fixture_title=$(jq -r .title "$repo/scripts/synthetic/definition.json")
-( prepare_init "$tmp/init-a" 15 "" ) >/dev/null 2>&1
-expect "no title keeps the fixture title" test "$(jq -r .title "$tmp/init-a/definition.json")" = "$fixture_title"
-( prepare_init "$tmp/init-b" 15 "Other title" ) >/dev/null 2>&1
-expect "a title replaces it" test "$(jq -r .title "$tmp/init-b/definition.json")" = "Other title"
+# prepare_init: each smoke survey gets its own title, so its own survey id.
+( prepare_init "$tmp/init-b" 15 "Smoke test b" ) >/dev/null 2>&1
+expect "prepare_init sets the survey title" test "$(jq -r .title "$tmp/init-b/definition.json")" = "Smoke test b"
 
 exit "$failures"

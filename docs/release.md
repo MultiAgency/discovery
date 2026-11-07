@@ -80,6 +80,8 @@ $s workload 18 ~/.discovery-smoke/workload # 7: the full 18 registrations
 $s create load 30
 for f in ~/.discovery-smoke/workload/workload-*.json; do $s submit load "$f"; done
 $s finalize load                           #    after its deadline; time the job
+$s refinalize load
+$s check load
 ```
 
 1. **Create and verify.** `create` writes a fresh definition (deadline in
@@ -124,3 +126,82 @@ and limits, job timing, cost, and on-chain provenance as the CLI sees it.
 
 `scripts/test-smoke.sh` checks the script's transaction recovery offline, with
 `near` and `curl` stubbed.
+
+## Release evidence
+
+What each release and candidate showed, newest last. Live use waits for a
+released candidate to pass the smoke test after its lock.
+
+- **Count check:** a respondent count in any public report field (for example
+  "two human respondents", "most responses") is a publication-check violation
+  in `crates/module/src/checks.rs`, retried and then withheld like any other.
+  It catches phrasing, not every semantic count. An earlier build (`286161a4`)
+  lacked it and released a report stating counts.
+- **Locked on testnet:** build
+  `be2b43ef74ed103e81067e715c425766058291b79f10777b2f835143cd9f56a6`, which
+  contains the count check, is the only version of
+  `test2.research.agency.testnet/discovery`. The owner's last access key was
+  deleted in tx `4EBFKYzTCSveqo3jHGARc5dujZz8Mu8r7mVqFM8Kfsrw`, and the owner
+  has no contract code. Before the lock, a synthetic full-capacity run on that
+  build showed:
+  - All 18 registrations filled with near-maximum responses. A 19th distinct
+    response got "survey is full", and a resend of an admitted one was
+    accepted.
+  - The first finalization failed on a model-provider error and stored
+    nothing. The retry released a report in 73 s of the 180 s limit, which
+    is useful headroom for that run, not a guarantee for every synthesis.
+  - The report passed the public checks (no planted identifiers, six-word
+    quotes, source labels or respondent counts).
+  - Refinalizing returned the identical report in 8 s. The survey then showed
+    closed with its key gone, and refused a late submission.
+- **Synthetic smoke test against the locked release** (2026-11-06):
+  - `discovery verify` and `report` accepted the release and every report
+    below. Early finalization was refused, and an identical retry and an
+    after-deadline submission were accepted.
+  - **main** (3 mixed-tier responses): **withheld**, because every draft failed
+    the publication checks (tx `EgT3B2EUub9Zv8ipgoCaaNqxzf1L4TX4cPjCWKNHxE1E`).
+    The reasons stay private, so the cause is unknown. Refinalize returned the
+    identical report, and the survey closed with its key replaced.
+  - **quiet2** (context-only, no phrasings): released with no findings (tx
+    `4rU8xsdjr2pgzsC3tZL9ByxZyj9LmEZAShyqyNyw4v9G`).
+  - **load** (all 18 registrations; a 19th distinct response got "survey is
+    full"): released in 34 s with one grounded acceptance-criterion change (tx
+    `7M1v1ahG6D8Pz1bGiabrCJEi5jgQMQzigq3okLdwHY7`). Refinalize returned the
+    identical report, and the survey closed with its key replaced.
+  - Every public report passed the smoke test's checks.
+- **Failure modes reproduced locally:** main's rejection reasons are private,
+  so its actual cause is unknown. Replaying main's three answer files through
+  the same model and checks reproduces likely causes. These are synthetic
+  batches of 10 runs per row, run locally against the live model with the
+  `live_synthesis` test in `crates/module/src/finalize.rs`; they are not
+  general release rates:
+
+  | Code | Quotes of publishable answers | Released | Withheld | Provider error |
+  |---|---|---|---|---|
+  | locked build `be2b43ef` | forbidden | 2 | 8 | 0 |
+  | locked build `be2b43ef` | allowed | 5 | 4 | 1 |
+  | release candidate `d6b8f058` | allowed (demo default) | 9 | 0 | 1 |
+  | release candidate `d6b8f058` | forbidden | 5 | 4 | 1 |
+  | release candidate `8b3e8333` | allowed (demo default) | 9 | 1 | 0 |
+
+  In those runs, the locked build's drafts kept stating counts ("one
+  respondent") and reusing answer wording, and the count check flagged real
+  counts. The release candidate's prompt mostly stops the counts, but
+  forbidding quotes still withholds often, because drafts reuse the product's
+  own vocabulary from publishable answers. Provider errors were transport failures between this
+  machine and NEAR AI; on-chain, such an error ends finalization, which is
+  then retried. The logs do not record a build hash: the release-candidate
+  rows rest on rebuilding the same source tree after the runs, which gave
+  `d6b8f058` again.
+- **Release candidate `d6b8f058`, full-capacity run on
+  `test3.research.agency.testnet/discovery`** (unlocked; test driver
+  definition with quotes forbidden and one withheld term): 18 of 18
+  near-maximum responses accepted, a 19th distinct one refused as full, a
+  resend accepted. Finalization **withheld** the report after 117 s of the 180 s
+  limit (tx `5W7EKWxGdxXYN5HJBy4ehdo1MbYA5uaYt8Q7c5ewEBjJ`); refinalize returned
+  the identical output in 8 s (tx `A1WXnbhhjwzKWQPQfub63V2hpqsh6Tx3aJ6Xww5uzeeh`),
+  and the survey closed with its key gone. It does not show how the demo
+  setting (quotes allowed) behaves at full capacity.
+- **Peak storage calls** are known only from local tests: 61 for 18 stored
+  responses and 97 in the worst case, within the 100-call budget below the
+  126th call at which testnet runs failed.

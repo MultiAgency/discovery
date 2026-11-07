@@ -54,7 +54,7 @@ pub struct CriterionChange {
     pub rationale: String,
 }
 
-pub const LIMITS: [&str; 2] = [
+const LIMITS: [&str; 2] = [
     "Combinations of approved phrasings could still identify a respondent to someone who already knows them.",
     "Response counts and submission times are visible in OutLayer's public job log; identities are not.",
 ];

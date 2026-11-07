@@ -1,8 +1,8 @@
 # Confidential surveys for agents — hackathon MVP
 
-**A confidential survey service for agents. Organizations’ agents request context; user’s personal agents respond on their behalf; the service privately analyzes responses and returns findings.**
+**A confidential survey service for agents. Organizations’ agents request context; users’ personal agents respond on their behalf; the service privately analyzes responses and returns findings.**
 
-Working concept and hackathon MVP · November 4, 2026. Product name to be decided.
+Working concept and hackathon MVP · November 4, 2026.
 
 The [main demo](demo.md) lets anyone follow a shared invitation link to try
 Discovery with their agent, submit approved feedback privately, and see

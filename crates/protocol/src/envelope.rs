@@ -20,7 +20,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::{err, random_bytes, Error, Hash, Result};
 
-pub const FORMAT: u8 = 0x01;
+const FORMAT: u8 = 0x01;
 const INFO: &[u8] = b"discovery:v1:envelope";
 const HEADER: usize = 1 + 32 + 24;
 
@@ -112,7 +112,7 @@ fn cipher(
 }
 
 /// `u32 length (LE) || data || zeros` up to [`PADDED`].
-pub fn pad(data: &[u8]) -> Result<Vec<u8>> {
+fn pad(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() > MAX_RESPONSE {
         return err(format!(
             "response too large: {} bytes (max {MAX_RESPONSE}); shorten the answers",
@@ -126,7 +126,7 @@ pub fn pad(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
+fn unpad(padded: &[u8]) -> Result<Vec<u8>> {
     if padded.len() != PADDED {
         return err("padded length is wrong");
     }

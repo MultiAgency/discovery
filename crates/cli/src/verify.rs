@@ -337,12 +337,22 @@ mod rpc {
     const RPC: &str = "https://archival-rpc.testnet.near.org";
 
     fn call(method: &str, params: Value) -> Result<Value> {
-        let reply: Value = ureq::post(RPC)
-            .timeout(std::time::Duration::from_secs(30))
-            .send_json(
-                json!({ "jsonrpc": "2.0", "id": "discovery", "method": method, "params": params }),
-            )?
-            .into_json()?;
+        let body =
+            json!({ "jsonrpc": "2.0", "id": "discovery", "method": method, "params": params });
+        // The public archival RPC rate-limits bursts; back off briefly.
+        let mut attempt = 0;
+        let reply: Value = loop {
+            attempt += 1;
+            match ureq::post(RPC)
+                .timeout(std::time::Duration::from_secs(30))
+                .send_json(&body)
+            {
+                Err(ureq::Error::Status(429, _)) if attempt < 4 => {
+                    std::thread::sleep(std::time::Duration::from_secs(5 * attempt));
+                }
+                result => break result?.into_json()?,
+            }
+        };
         if let Some(e) = reply.get("error") {
             return Err(format!("rpc {method}: {e}").into());
         }

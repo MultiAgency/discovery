@@ -14,9 +14,9 @@ approve. Afterwards a synthesized report is posted on
 [issue #1](https://github.com/MultiAgency/discovery/issues/1), and supported
 findings become proposed GitHub issues.
 
-What we want to learn is what joining is actually like, including where it went
-wrong. If you get stuck, that is a finding: tell us through the private help
-route below rather than in public.
+We want to learn what joining is actually like, including what went wrong. If
+you get stuck, that is a finding: tell us through the private help route below,
+not in public.
 
 ## Before you start
 
@@ -105,11 +105,9 @@ discovery submit <survey id> --init-tx <creation tx> --target MultiAgency/discov
 ```
 
 It verifies the survey again, encrypts the answers on your machine and prints
-"Submitted." on success. If it fails or times out, retrying the same answers is
-safe: they count once. The survey accepts at most 18 responses, fewer if
-submissions are interrupted. "survey is full" or "survey is closed" means this
-attempt was refused. If an earlier attempt with the same answers failed or timed
-out, that one may still have been stored and counted.
+"Submitted." on success. If it fails or times out, retry with the same answers:
+they count once, even if the earlier attempt was stored. "survey is full" (at
+most 18 responses) or "survey is closed" means this attempt was refused.
 
 ## Privacy limits
 
@@ -119,9 +117,8 @@ is not anonymity: distinctive details you approve could identify you to someone
 who knows you. OutLayer's public job log shows submission counts and times.
 Please don't comment, react or otherwise say publicly that you took part.
 
-The payment key above is public and pays for submissions. Anyone holding it can
-spend its small balance; if submissions fail with a payment error, use the help
-route.
+The payment key above is public and pays for submissions. If a submission fails
+with a payment error, use the help route.
 
 ## Timing and results
 

@@ -1,10 +1,10 @@
 // Derived from MultiAgency/private-ai@dd469a5 app/src/attest.rs. Local changes: module documentation in mod.rs.
-//! Verifies a NEAR AI Cloud attestation report before any data is sent, per
-//! docs.near.ai/cloud/verification: for the gateway and every model candidate,
-//! an Intel TDX quote whose report data binds the signing key and our nonce,
-//! whose MRCONFIGID is the hash of the attested compose file, and whose RTMR3
-//! matches the replayed event log; for the model, NVIDIA's signed verdict on
-//! its GPUs for the same nonce. Port of `core/attest.mjs`.
+//! Verifies the NEAR AI model this service encrypts to before any data is
+//! sent, per docs.near.ai/cloud/verification: an Intel TDX quote whose report
+//! data binds the model's signing key and our nonce and whose MRCONFIGID is
+//! the hash of the attested compose file, and NVIDIA's signed verdict on its
+//! GPUs for the same nonce. The gateway is not checked: under E2EE it relays
+//! only ciphertext. Port of `core/attest.mjs`.
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
 use dcap_qvl::configs::DefaultConfig;
@@ -12,21 +12,10 @@ use dcap_qvl::verify::QuoteVerifier;
 use dcap_qvl::QuoteCollateralV3;
 use p384::ecdsa::signature::Verifier;
 use serde_json::Value;
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha256};
 
 /// The model reads private data, so its platform must be fully patched.
 pub const MODEL_TCB: &[&str] = &["UpToDate"];
-/// Under E2EE the gateway relays ciphertext only. Its quote must still verify
-/// and bind our nonce, but a pending platform patch there does not expose
-/// private model input. These relaxed statuses apply only to the gateway.
-pub const GATEWAY_TCB: &[&str] = &[
-    "UpToDate",
-    "SWHardeningNeeded",
-    "ConfigurationNeeded",
-    "ConfigurationAndSWHardeningNeeded",
-    "OutOfDate",
-    "OutOfDateConfigurationNeeded",
-];
 
 pub const NRAS: &str = "https://nras.attestation.nvidia.com";
 
@@ -36,7 +25,6 @@ pub struct Verified {
     pub advisory_ids: Vec<String>,
     pub report_data: [u8; 64],
     pub mr_config_id: [u8; 48],
-    pub rt_mr3: [u8; 48],
     pub debug: bool,
 }
 
@@ -54,7 +42,6 @@ pub fn verify_quote(quote: &[u8], collateral: &QuoteCollateralV3, now: u64) -> R
         advisory_ids: verified.advisory_ids,
         report_data: td.report_data,
         mr_config_id: td.mr_config_id,
-        rt_mr3: td.rt_mr3,
         debug: td.td_attributes[0] & 1 == 1,
     })
 }
@@ -70,18 +57,6 @@ pub struct Options<'a> {
     pub nvidia: &'a dyn Nvidia,
 }
 
-/// A model whose signer, configuration and hardware evidence were verified.
-#[derive(Clone, Debug)]
-pub struct Model {
-    pub public_key: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct Attestation {
-    /// All verified candidates, with unique signer keys; the first is used for E2EE.
-    pub models: Vec<Model>,
-}
-
 /// A JSON field that NEAR AI sends either as an object or as a JSON string of one.
 fn parse(value: &Value) -> Result<Value> {
     match value {
@@ -90,49 +65,18 @@ fn parse(value: &Value) -> Result<Value> {
     }
 }
 
-pub fn replay_rtmr3(event_log: &Value) -> Result<[u8; 48]> {
-    let mut rtmr3 = [0u8; 48];
-    for event in parse(event_log)?.as_array().into_iter().flatten() {
-        if event["imr"].as_u64() != Some(3) {
-            continue;
-        }
-        let mut hasher = Sha384::new();
-        hasher.update((event["event_type"].as_u64().unwrap_or(0) as u32).to_le_bytes());
-        hasher.update(b":");
-        hasher.update(event["event"].as_str().unwrap_or("").as_bytes());
-        hasher.update(b":");
-        hasher.update(crate::nearai::bytes(
-            event["event_payload"].as_str().unwrap_or(""),
-        )?);
-        let digest = hasher.finalize();
-        if let Some(recorded) = event["digest"].as_str().filter(|d| !d.is_empty()) {
-            if crate::nearai::bytes(recorded)? != digest.as_slice() {
-                bail!(
-                    "event log digest mismatch for {}",
-                    event["event"].as_str().unwrap_or("")
-                );
-            }
-        }
-        let mut extend = Sha384::new();
-        extend.update(rtmr3);
-        extend.update(digest);
-        rtmr3.copy_from_slice(&extend.finalize());
-    }
-    Ok(rtmr3)
-}
-
-/// Verify the TDX report, signer, nonce and application configuration.
-pub fn check_report(
+/// Verify the TDX report, signer, nonce and application configuration;
+/// returns the attested signing key.
+fn check_report(
     report: &Value,
     nonce: &str,
-    accepted: &[&str],
     verify_quote: &dyn Fn(&[u8]) -> Result<Verified>,
-) -> Result<Model> {
+) -> Result<String> {
     let quote = report["intel_quote"]
         .as_str()
         .ok_or_else(|| anyhow!("no Intel quote"))?;
     let verified = verify_quote(&crate::nearai::bytes(quote)?)?;
-    if !accepted.contains(&verified.status.as_str()) {
+    if !MODEL_TCB.contains(&verified.status.as_str()) {
         let advisories = if verified.advisory_ids.is_empty() {
             "no advisories".to_string()
         } else {
@@ -143,7 +87,6 @@ pub fn check_report(
     if verified.debug {
         bail!("TDX debug mode is enabled");
     }
-
     if report["signing_algo"].as_str() != Some("ed25519") {
         bail!("unexpected signing algorithm {}", report["signing_algo"]);
     }
@@ -152,48 +95,21 @@ pub fn check_report(
     if identity.len() != 32 {
         bail!("malformed signing address");
     }
-    let bound = match report["tls_cert_fingerprint"]
-        .as_str()
-        .filter(|f| !f.is_empty())
-    {
-        Some(fingerprint) => Sha256::new()
-            .chain_update(&identity)
-            .chain_update(crate::nearai::bytes(fingerprint)?)
-            .finalize()
-            .to_vec(),
-        None => identity,
-    };
-    let expected: Vec<u8> = [bound, crate::nearai::bytes(nonce)?].concat();
+    let expected = [identity, crate::nearai::bytes(nonce)?].concat();
     if verified.report_data.as_slice() != expected.as_slice() {
         bail!("report data does not bind the signer and nonce");
     }
-    if report["request_nonce"]
-        .as_str()
-        .map(str::to_lowercase)
-        .as_deref()
-        != Some(nonce)
-    {
-        bail!("echoed nonce does not match");
-    }
-
     let tcb_info = parse(&report["info"]["tcb_info"])?;
     let compose = tcb_info["app_compose"]
         .as_str()
         .ok_or_else(|| anyhow!("no compose file attested"))?;
-    let compose_hash = Sha256::digest(compose.as_bytes());
     let mut mr_config_id = [0u8; 48];
     mr_config_id[0] = 1;
-    mr_config_id[1..33].copy_from_slice(&compose_hash);
+    mr_config_id[1..33].copy_from_slice(&Sha256::digest(compose.as_bytes()));
     if verified.mr_config_id != mr_config_id {
         bail!("MRCONFIGID does not match the attested compose file");
     }
-    if replay_rtmr3(&report["event_log"])? != verified.rt_mr3 {
-        bail!("event log does not match RTMR3");
-    }
-
-    Ok(Model {
-        public_key: signer.to_string(),
-    })
+    Ok(signer.to_string())
 }
 
 fn base64url(text: &str) -> Result<Vec<u8>> {
@@ -248,59 +164,21 @@ pub fn check_nvidia_token(token: &str, nonce: &str, keys: &[Value]) -> Result<()
     Ok(())
 }
 
-fn check_model(candidate: &Value, nonce: &str, options: &Options) -> Result<Model> {
-    let model = check_report(candidate, nonce, MODEL_TCB, options.verify_quote)?;
+/// Verify the first model candidate, the one requests are encrypted to and
+/// whose key must sign every reply; other candidates never see data.
+pub fn verify_attestation(body: &Value, nonce: &str, options: &Options) -> Result<String> {
+    let candidate = body["model_attestations"]
+        .get(0)
+        .ok_or_else(|| anyhow!("no model evidence returned"))?;
+    let key = check_report(candidate, nonce, options.verify_quote)?;
     if candidate["nvidia_payload"].is_null() || candidate["nvidia_payload"] == "" {
         bail!("no GPU evidence");
     }
-    let payload = parse(&candidate["nvidia_payload"])?;
-    let payload_nonce = match &payload["nonce"] {
-        Value::String(s) => s.to_lowercase(),
-        other => other.to_string(),
-    };
-    if payload_nonce != nonce {
-        bail!("GPU evidence does not bind the nonce");
-    }
-    let token = options.nvidia.token(&payload)?;
+    let token = options
+        .nvidia
+        .token(&parse(&candidate["nvidia_payload"])?)?;
     check_nvidia_token(&token, nonce, &options.nvidia.keys()?)?;
-    let public_key = candidate["signing_public_key"].as_str().unwrap_or("");
-    if public_key.to_lowercase() != model.public_key.to_lowercase() {
-        bail!("encryption key is not the attested signing key");
-    }
-    Ok(model)
-}
-
-/// Verify every candidate before inference, rejecting ambiguous signer
-/// identities. The first verified model is the key selected for E2EE; signed
-/// turns must match that key, which has exactly one retained preflight report.
-pub fn verify_attestation(body: &Value, nonce: &str, options: &Options) -> Result<Attestation> {
-    check_report(
-        &body["gateway_attestation"],
-        nonce,
-        GATEWAY_TCB,
-        options.verify_quote,
-    )
-    .map_err(|e| anyhow!("gateway: {e}"))?;
-    let candidates = body["model_attestations"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if candidates.is_empty() {
-        bail!("no model evidence returned");
-    }
-    let mut models: Vec<Model> = Vec::with_capacity(candidates.len());
-    for (index, candidate) in candidates.iter().enumerate() {
-        let model = check_model(candidate, nonce, options)
-            .map_err(|e| anyhow!("model candidate {index}: {e}"))?;
-        if models
-            .iter()
-            .any(|m| m.public_key.eq_ignore_ascii_case(&model.public_key))
-        {
-            bail!("ambiguous model signer: more than one preflight report matches");
-        }
-        models.push(model);
-    }
-    Ok(Attestation { models })
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -311,29 +189,32 @@ mod tests {
     use serde_json::json;
 
     // Real NVIDIA-format JWT signatures; hardware quotes are supplied by an
-    // injected verifier so these tests exercise candidate policy offline.
+    // injected verifier so these tests exercise the policy offline.
     struct TestNvidia {
         key: SigningKey,
+        claims: Value,
     }
     impl TestNvidia {
         fn new() -> Self {
+            Self::with(json!({}))
+        }
+        /// Overrides merged into otherwise valid verdict claims.
+        fn with(claims: Value) -> Self {
             Self {
                 key: SigningKey::from_slice(&[7; 48]).unwrap(),
+                claims,
             }
         }
     }
     impl Nvidia for TestNvidia {
         fn token(&self, payload: &Value) -> Result<String> {
-            if payload["candidate"] == 98 {
-                return Ok("invalid JWT".into());
-            }
             let header = B64.encode(json!({"alg":"ES384", "kid":"test"}).to_string());
-            let claims = B64.encode(
-                json!({"iss": NRAS, "eat_nonce": payload["nonce"],
-                "x-nvidia-overall-att-result": true})
-                .to_string(),
-            );
-            let text = format!("{header}.{claims}");
+            let mut claims = json!({"iss": NRAS, "eat_nonce": payload["nonce"],
+                "x-nvidia-overall-att-result": true});
+            for (k, v) in self.claims.as_object().unwrap() {
+                claims[k] = v.clone();
+            }
+            let text = format!("{header}.{}", B64.encode(claims.to_string()));
             let sig: Signature = self.key.sign(text.as_bytes());
             Ok(format!("{text}.{}", B64.encode(sig.to_bytes())))
         }
@@ -355,11 +236,10 @@ mod tests {
     }
     fn report(seed: u8) -> Value {
         json!({ "intel_quote": hex::encode([seed]), "signing_algo":"ed25519",
-            "signing_address":signer(seed), "signing_public_key":signer(seed),
-            "request_nonce":NONCE, "report_data":format!("{}{}",signer(seed),NONCE),
-            "info":{"tcb_info":{"app_compose":"test compose"}}, "event_log":[],
-            "nvidia_payload":{"nonce":NONCE,"candidate":seed} })
+            "signing_address":signer(seed), "info":{"tcb_info":{"app_compose":"test compose"}},
+            "nvidia_payload":{"nonce":NONCE} })
     }
+    /// A valid quote for the report with `seed`; 99 fails verification.
     fn quote(bytes: &[u8]) -> Result<Verified> {
         if bytes == [99] {
             bail!("invalid hardware quote");
@@ -375,64 +255,109 @@ mod tests {
             advisory_ids: vec![],
             report_data: data,
             mr_config_id: config,
-            rt_mr3: [0; 48],
             debug: false,
         })
     }
-    fn body(candidates: Vec<Value>) -> Value {
-        json!({"gateway_attestation":report(10), "model_attestations":candidates})
+    fn verify(candidates: Vec<Value>, nvidia: &TestNvidia) -> Result<String> {
+        let body = json!({ "model_attestations": candidates });
+        verify_attestation(
+            &body,
+            NONCE,
+            &Options {
+                verify_quote: &quote,
+                nvidia,
+            },
+        )
     }
 
     #[test]
-    fn a_bad_candidate_is_rejected_even_beside_a_valid_candidate() {
+    fn the_first_candidate_is_verified_and_its_key_returned() {
         let nvidia = TestNvidia::new();
-        let options = Options {
-            verify_quote: &quote,
-            nvidia: &nvidia,
+        // Later candidates are never used, so they are not verified.
+        assert_eq!(
+            verify(vec![report(1), report(99)], &nvidia).unwrap(),
+            signer(1)
+        );
+        assert!(verify(vec![report(99), report(1)], &nvidia).is_err());
+        assert!(verify(vec![], &nvidia).is_err());
+    }
+
+    #[test]
+    fn every_report_and_gpu_check_fails_closed() {
+        let nvidia = TestNvidia::new();
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+        for (name, field, value) in [
+            ("signing algorithm", "signing_algo", json!("secp256k1")),
+            (
+                "signer not bound by the quote",
+                "signing_address",
+                json!(signer(2)),
+            ),
+            (
+                "compose file",
+                "info",
+                json!({"tcb_info": {"app_compose": "other"}}),
+            ),
+            ("no GPU evidence", "nvidia_payload", Value::Null),
+        ] {
+            let mut r = report(1);
+            r[field] = value;
+            cases.push((name, r));
+        }
+        for (name, r) in cases {
+            assert!(verify(vec![r], &nvidia).is_err(), "{name}");
+        }
+        let check = |verified: Verified| {
+            check_report(&report(1), NONCE, &move |_: &[u8]| {
+                Ok(verified_copy(&verified))
+            })
         };
-        for candidates in [vec![report(1), report(99)], vec![report(99), report(1)]] {
-            assert!(verify_attestation(&body(candidates), NONCE, &options).is_err());
+        let valid = quote(&[1]).unwrap();
+        assert!(check(verified_copy(&valid)).is_ok());
+        assert!(check(Verified {
+            status: "OutOfDate".into(),
+            ..verified_copy(&valid)
+        })
+        .is_err());
+        assert!(check(Verified {
+            debug: true,
+            ..verified_copy(&valid)
+        })
+        .is_err());
+        let mut other_nonce = verified_copy(&valid);
+        other_nonce.report_data[63] ^= 1;
+        assert!(check(other_nonce).is_err());
+        for claims in [
+            json!({"iss": "https://example.invalid"}),
+            json!({"eat_nonce": "00"}),
+            json!({"x-nvidia-overall-att-result": false}),
+        ] {
+            assert!(
+                verify(vec![report(1)], &TestNvidia::with(claims.clone())).is_err(),
+                "{claims}"
+            );
+        }
+    }
+
+    fn verified_copy(v: &Verified) -> Verified {
+        Verified {
+            status: v.status.clone(),
+            advisory_ids: v.advisory_ids.clone(),
+            report_data: v.report_data,
+            mr_config_id: v.mr_config_id,
+            debug: v.debug,
         }
     }
 
     #[test]
-    fn invalid_gpu_verdict_rejects_the_entire_candidate_set() {
-        let nvidia = TestNvidia::new();
-        let options = Options {
-            verify_quote: &quote,
-            nvidia: &nvidia,
-        };
-        for candidates in [vec![report(1), report(98)], vec![report(98), report(1)]] {
-            assert!(verify_attestation(&body(candidates), NONCE, &options).is_err());
-        }
-    }
-
-    #[test]
-    fn ambiguous_model_signers_are_rejected() {
-        let nvidia = TestNvidia::new();
-        let options = Options {
-            verify_quote: &quote,
-            nvidia: &nvidia,
-        };
-        assert!(verify_attestation(&body(vec![report(1), report(1)]), NONCE, &options).is_err());
-    }
-
-    #[test]
-    fn a_signed_turn_must_match_the_uniquely_selected_preflight_key() {
-        let nvidia = TestNvidia::new();
-        let options = Options {
-            verify_quote: &quote,
-            nvidia: &nvidia,
-        };
-        let checked =
-            verify_attestation(&body(vec![report(1), report(2)]), NONCE, &options).unwrap();
+    fn a_signed_turn_must_match_the_attested_key() {
+        let key = verify(vec![report(1)], &TestNvidia::new()).unwrap();
         let text = crate::nearai::sign::signed_text("model", "request", "response");
         for seed in [1, 2] {
             let sig = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).sign(text.as_bytes());
             let signed = json!({"signature_kind":"provider_tee", "signing_algo":"ed25519",
                 "signing_address":signer(seed), "text":text, "signature":hex::encode(sig.to_bytes())});
-            let result =
-                crate::nearai::sign::check_signature(&signed, &text, &checked.models[0].public_key);
+            let result = crate::nearai::sign::check_signature(&signed, &text, &key);
             assert_eq!(result.is_ok(), seed == 1);
         }
     }
